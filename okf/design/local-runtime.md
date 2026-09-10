@@ -75,6 +75,14 @@ runtime.
     outputs :: #{slot() => [name()]},  % куда уходит выход слота
     inputs  :: #{slot() => [name()]}   % откуда приходит вход слота
 }).
+```
+
+`#pnode.outputs` и `#pnode.inputs` содержат ключ для каждого объявленного
+слота. Слот без рёбер хранится с пустым списком: выход в такой слот никуда не
+доставляется, а выход в слот, отсутствующий среди ключей, является ошибкой
+маршрутизации.
+
+```erlang
 
 -record(pedge, {
     kind :: message | ingress | egress | feedback,
@@ -578,8 +586,8 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 собранной программе может быть много.
 
 ```erlang
--spec compile(#graph{}) -> {ok, #program{}} | {error, term()}.
--spec new(#program{}, inputs()) ->
+-spec compile(#graph{}) -> {ok, program()} | {error, compile_error()}.
+-spec new(program(), inputs()) ->
     {ok, execution()}
     | {error, {unknown_input, name()} | {duplicate_input, name()}
             | {init_crashed, name(), exception()}}.
@@ -589,8 +597,16 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 -spec outputs(execution()) -> outputs().
 -spec violations(execution()) -> [violation()].
 -spec steps(execution()) -> non_neg_integer().
+-spec inspect(program() | execution()) -> map().
 
+-opaque program() :: #program{}.
 -opaque execution() :: #execution{}.
+
+-type compile_error() ::
+    {unknown_module, name(), module()}
+  | {missing_callback, name(), module(), {atom(), arity()}}
+  | {unknown_input_slot, name(), name(), slot()}
+  | {unknown_output_slot, name(), name(), slot()}.
 
 -type inputs()  :: [{name(), [{term(), ari_vtime:t()}]}].
 -type outputs() :: #{name() => [{term(), ari_vtime:t()}]}.
@@ -604,6 +620,12 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 `compile/1` выполняет всё, что описано в разделе «Сборка»: проверяет модули и
 слоты, переводит `#graph{}` в `#program{}` и считает сводки путей. Ошибки графа
 возвращаются здесь, и в прогоне их уже не встречается.
+`{unknown_module, Node, Module}` означает модуль, который не загружается;
+`{missing_callback, Node, Module, {Function, Arity}}` — модуль без функции
+контракта узла; `{unknown_input_slot, Edge, Node, Slot}` и
+`{unknown_output_slot, Edge, Node, Slot}` — ребро, конец которого называет
+слот, отсутствующий в `Module:input()` или `Module:output()`. В каждой ошибке
+узел и ребро названы именами из DSL.
 
 `new/2` вызывает `init/1` каждого узла, наполняет входные очереди и ловит ошибки
 адресации до первого шага. `{unknown_input, Name}` означает имя, которого нет
@@ -623,6 +645,11 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 вызовом `advance(Exec, 1)`, и он же служит трассировкой: после каждого перехода
 видны очереди, счётчики, запросы, `steps` и `violations`. Отдельного механизма
 трассировки ядро не заводит.
+
+`inspect/1` показывает программу или состояние прогона в виде map с ключами по
+именам полей `#program{}` и `#execution{}`; записи внутри также развёрнуты в
+map. Записи наружу не выходят, и тесты с пошаговой диагностикой читают этот
+map.
 
 Вход адресуется именами входных полурёбер, выход — именами выходных. Значением
 служит список пар сообщения и времени; у входа это порядок загрузки, у выхода
