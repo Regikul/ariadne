@@ -1,0 +1,5 @@
+#!/bin/sh
+
+exec env -u DEBUG \
+    ERL_FLAGS="${ERL_FLAGS:+${ERL_FLAGS} }-kernel error_logger silent" \
+    rebar3 "$@"
