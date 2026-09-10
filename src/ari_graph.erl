@@ -9,7 +9,8 @@
 %% в `#egress{}`. Feedback-рёбра связываются с содержащим их циклом.
 %%
 %% Сборка проверяет уникальность имён, существование узлов на концах рёбер
-%% и отсутствие циклов после исключения feedback-рёбер. Несовмещённые
+%% и ацикличность каждого контекста со свёрнутыми вложенными циклами,
+%% исключая собственные feedback-рёбра. Проверяется и плоский граф. Несовмещённые
 %% полурёбра цикла являются ошибкой.
 %%
 %% Модули узлов и соответствие слотов callbacks здесь не проверяются:
@@ -68,22 +69,53 @@ build(Items, Context) ->
     {Loops, RawEdges} = lists:partition(fun(Item) -> is_record(Item, loop) end, Rest),
     NodeNames = [Node#node.name || Node <- Nodes],
     Edges = [prepare_edge(Edge, NodeNames, Context) || Edge <- RawEdges],
-    {LoopNodes, LoopEdges, LoopNames, RemainingEdges} = build_loops(Loops, Edges),
-    {Nodes ++ LoopNodes, RemainingEdges ++ LoopEdges, LoopNames}.
+    {LoopNodes, LoopEdges, LoopNames, RemainingEdges, LoopOwners} = build_loops(Loops, Edges),
+    AllEdges = RemainingEdges ++ LoopEdges,
+    Owners = maps:merge(LoopOwners, maps:from_list([{Name, {node, Name}} || Name <- NodeNames])),
+    ensure_context_acyclic(Context, Owners, AllEdges),
+    {Nodes ++ LoopNodes, AllEdges, LoopNames}.
 
 %% @doc Раскрывает циклы и соединяет их полурёбра с текущим контекстом.
 build_loops([], Edges) ->
-    {[], [], [], Edges};
+    {[], [], [], Edges, #{}};
 build_loops([#loop{name = Name, items = Items} | Rest], Edges) ->
     {Nodes, InnerEdges, InnerLoops} = build(Items, {loop, Name}),
     {ResolvedEdges, RemainingEdges} = resolve_boundaries(Name, InnerEdges, Edges),
-    {RestNodes, RestEdges, RestLoops, FinalEdges} = build_loops(Rest, RemainingEdges),
+    {RestNodes, RestEdges, RestLoops, FinalEdges, RestOwners} = build_loops(Rest, RemainingEdges),
     {
         Nodes ++ RestNodes,
         ResolvedEdges ++ RestEdges,
         [Name | InnerLoops] ++ RestLoops,
-        FinalEdges
+        FinalEdges,
+        maps:merge(RestOwners, maps:from_list([
+            {Node#node.name, {loop, Name}} || Node <- Nodes
+        ]))
     }.
+
+%% @doc Сворачивает потомков каждого вложенного цикла в одну вершину.
+%% Внутренние рёбра этих вершин уже проверены в дочерних контекстах.
+%% Метки node/loop разделяют пространства имён узлов и циклов.
+ensure_context_acyclic(Context, Owners, Edges) ->
+    Names = lists:usort(maps:values(Owners)),
+    Arcs = lists:filtermap(
+        fun(Edge) ->
+            case arc(Edge) of
+                {true, {From, To}} ->
+                    Source = maps:get(From, Owners),
+                    Target = maps:get(To, Owners),
+                    case {Source, Target} of
+                        {{loop, Loop}, {loop, Loop}} -> false;
+                        _ -> {true, {Source, Target}}
+                    end;
+                false -> false
+            end
+        end,
+        Edges
+    ),
+    case acyclic(Names, Arcs) of
+        true -> ok;
+        false -> invalid({cycle_without_feedback, Context})
+    end.
 
 prepare_edge(Edge, Nodes, Context) ->
     validate_edge(Edge, Nodes, Context),
@@ -226,14 +258,17 @@ duplicate([Value | Rest]) ->
 %% @doc Проверяет ацикличность графа после исключения feedback-рёбер.
 ensure_acyclic(Nodes, Edges) ->
     Names = [Node#node.name || Node <- Nodes],
-    Degrees0 = maps:from_list([{Name, 0} || Name <- Names]),
     Arcs = lists:filtermap(fun arc/1, Edges),
-    {Adjacency, Degrees} = lists:foldl(fun add_arc/2, {#{}, Degrees0}, Arcs),
-    Ready = [Name || {Name, 0} <- maps:to_list(Degrees)],
-    case visit(Ready, Adjacency, Degrees, 0) =:= length(Names) of
+    case acyclic(Names, Arcs) of
         true -> ok;
         false -> invalid(cycle)
     end.
+
+acyclic(Names, Arcs) ->
+    Degrees0 = maps:from_list([{Name, 0} || Name <- Names]),
+    {Adjacency, Degrees} = lists:foldl(fun add_arc/2, {#{}, Degrees0}, Arcs),
+    Ready = [Name || {Name, 0} <- maps:to_list(Degrees)],
+    visit(Ready, Adjacency, Degrees, 0) =:= length(Names).
 
 arc(#edge{from = {From, _}, to = {To, _}}) -> {true, {From, To}};
 arc(#ingress{from = {From, _}, to = {To, _}}) -> {true, {From, To}};

@@ -31,12 +31,17 @@ egress({Time, [_Iteration | OuterIterations]}) ->
 feedback({Time, [Iteration | OuterIterations]}) ->
     {Time, [Iteration + 1 | OuterIterations]}.
 
-%% @doc Проверяет покомпонентный частичный порядок времён одной глубины.
+%% @doc Сравнивает эпохи и, независимо, векторы итераций одной глубины.
+%% Итерации сравниваются лексикографически от внешнего цикла к внутреннему.
 -spec le(t(), t()) -> boolean().
 le({TimeA, IterationsA}, {TimeB, IterationsB}) ->
-    TimeA =< TimeB andalso iterations_le(IterationsA, IterationsB).
+    TimeA =< TimeB andalso iterations_compare(IterationsA, IterationsB) =/= greater.
 
-iterations_le([], []) ->
-    true;
-iterations_le([IterationA | RestA], [IterationB | RestB]) ->
-    IterationA =< IterationB andalso iterations_le(RestA, RestB).
+iterations_compare([], []) ->
+    equal;
+iterations_compare([IterationA | RestA], [IterationB | RestB]) ->
+    case iterations_compare(RestA, RestB) of
+        equal when IterationA < IterationB -> less;
+        equal when IterationA > IterationB -> greater;
+        Order -> Order
+    end.
