@@ -2,7 +2,8 @@
 %%
 %% `compile/1` переводит плоский `#graph{}` в неизменную программу:
 %% проверяет модули узлов и слоты на концах рёбер, строит индексы
-%% маршрутизации и фиксирует стабильные порядки узлов и рёбер.
+%% маршрутизации, фиксирует стабильные порядки узлов и рёбер и считает
+%% минимальные сводки непустых путей между узлами.
 %%
 %% Собственных процессов модуль не создаёт; прогон идёт по месту вызова.
 %%
@@ -55,7 +56,8 @@
     node_order :: [name()],
     inputs :: [name()],
     outputs :: [name()],
-    summaries = #{} :: #{{name(), name()} => list()}
+    %% Антицепь минимальных сводок непустых путей для каждой пары узлов.
+    summaries :: #{{name(), name()} => [ari_vtime:summary()]}
 }).
 
 -opaque program() :: #program{}.
@@ -112,8 +114,60 @@ build(Nodes, Edges) ->
         edge_order = EdgeOrder,
         node_order = NodeOrder,
         inputs = [Name || Name <- EdgeOrder, (maps:get(Name, PEdges))#pedge.from =:= undefined],
-        outputs = [Name || Name <- EdgeOrder, (maps:get(Name, PEdges))#pedge.to =:= undefined]
+        outputs = [Name || Name <- EdgeOrder, (maps:get(Name, PEdges))#pedge.to =:= undefined],
+        summaries = summaries(EdgeOrder, PEdges)
     }.
+
+%% @doc Считает минимальные сводки непустых путей. Начальные сводки берутся
+%% из рёбер с обоими концами; каждый найденный путь продолжается ещё одним
+%% ребром до неподвижной точки. Доминируемые сводки отбрасываются, поэтому
+%% лишние обороты циклов вычисление не продлевают.
+summaries(EdgeOrder, Edges) ->
+    Arcs = [
+        {From, To, Kind}
+     || Name <- EdgeOrder,
+        #pedge{kind = Kind, from = {From, _}, to = {To, _}} <- [maps:get(Name, Edges)]
+    ],
+    Initial = lists:foldl(
+        fun({From, To, Kind}, Table) ->
+            add_summary({From, To}, ari_vtime:summary(Kind), Table)
+        end,
+        #{},
+        Arcs
+    ),
+    extend_summaries(Initial, Arcs).
+
+extend_summaries(Table, Arcs) ->
+    Extended = maps:fold(
+        fun({From, Via}, Summaries, Acc) ->
+            lists:foldl(
+                fun({Summary, {_Via, To, Kind}}, Inner) ->
+                    Composed = ari_vtime:compose(Summary, ari_vtime:summary(Kind)),
+                    add_summary({From, To}, Composed, Inner)
+                end,
+                Acc,
+                [{Summary, Arc} || Summary <- Summaries, {V, _, _} = Arc <- Arcs, V =:= Via]
+            )
+        end,
+        Table,
+        Table
+    ),
+    case Extended =:= Table of
+        true -> Table;
+        false -> extend_summaries(Extended, Arcs)
+    end.
+
+%% @doc Добавляет сводку в антицепь пары узлов. Антицепь хранится
+%% отсортированным списком, поэтому равные таблицы равны структурно.
+add_summary(Key, Summary, Table) ->
+    Summaries = maps:get(Key, Table, []),
+    case lists:any(fun(Known) -> ari_vtime:dominates(Known, Summary) end, Summaries) of
+        true ->
+            Table;
+        false ->
+            Kept = [Known || Known <- Summaries, not ari_vtime:dominates(Summary, Known)],
+            maps:put(Key, lists:sort([Summary | Kept]), Table)
+    end.
 
 %% @doc Проверяет модуль узла и возвращает его объявленные слоты.
 node_slots(#node{name = Name, module = Module}) ->

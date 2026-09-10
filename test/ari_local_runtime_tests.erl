@@ -38,7 +38,7 @@ linear_graph_test() ->
             node_order => [a, b],
             inputs => [input],
             outputs => [output],
-            summaries => #{}
+            summaries => #{{a, b} => [ari_vtime:summary(0, 0, [])]}
         },
         ari_local_runtime:inspect(Program)
     ).
@@ -59,7 +59,7 @@ loop_graph_test() ->
         ari_graph:in(output, {sink, input})
     ]),
     {ok, Program} = ari_local_runtime:compile(Graph),
-    #{nodes := Nodes, edges := Edges, inputs := Inputs, outputs := Outputs} =
+    #{nodes := Nodes, edges := Edges, inputs := Inputs, outputs := Outputs, summaries := Summaries} =
         ari_local_runtime:inspect(Program),
     ?assertEqual(
         #{
@@ -73,7 +73,65 @@ loop_graph_test() ->
     ?assertEqual(#{input => [input, next]}, maps:get(inputs, maps:get(a, Nodes))),
     ?assertEqual(#{output => [next, output]}, maps:get(outputs, maps:get(b, Nodes))),
     ?assertEqual([], Inputs),
-    ?assertEqual([], Outputs).
+    ?assertEqual([], Outputs),
+    Summary = fun(Pop, Bump, Push) -> [ari_vtime:summary(Pop, Bump, Push)] end,
+    ?assertEqual(
+        #{
+            {source, a} => Summary(0, 0, [0]),
+            {source, b} => Summary(0, 0, [0]),
+            {source, sink} => Summary(0, 0, []),
+            {a, a} => Summary(0, 1, []),
+            {a, b} => Summary(0, 0, []),
+            {a, sink} => Summary(1, 0, []),
+            {b, a} => Summary(0, 1, []),
+            {b, b} => Summary(0, 1, []),
+            {b, sink} => Summary(1, 0, [])
+        },
+        Summaries
+    ).
+
+%% Внутренний цикл `inner` из `a` и `b` вложен во внешний `outer` с узлом
+%% `c` перед ним и `d` после. Обратный путь `a -> a` через внешний feedback
+%% снимает внутреннюю координату, увеличивает внешнюю и входит заново.
+nested_loop_summaries_test() ->
+    Graph = ari_graph:graph([
+        ari_graph:node(source, ari_test_node, #{}),
+        ari_graph:node(sink, ari_test_node, #{}),
+        ari_graph:out(enter, {source, output}),
+        ari_graph:loop(outer, [
+            ari_graph:node(c, ari_test_node, #{}),
+            ari_graph:node(d, ari_test_node, #{}),
+            ari_graph:in(enter, {c, input}),
+            ari_graph:out(descend, {c, output}),
+            ari_graph:loop(inner, [
+                ari_graph:node(a, ari_test_node, #{}),
+                ari_graph:node(b, ari_test_node, #{}),
+                ari_graph:in(descend, {a, input}),
+                ari_graph:edge(a_to_b, {a, output}, {b, input}),
+                ari_graph:feedback(again, {b, output}, {a, input}),
+                ari_graph:out(ascend, {b, output})
+            ]),
+            ari_graph:in(ascend, {d, input}),
+            ari_graph:feedback(repeat, {d, output}, {c, input}),
+            ari_graph:out(leave, {d, output})
+        ]),
+        ari_graph:in(leave, {sink, input})
+    ]),
+    {ok, Program} = ari_local_runtime:compile(Graph),
+    #{summaries := Summaries} = ari_local_runtime:inspect(Program),
+    Summary = fun(Pop, Bump, Push) -> ari_vtime:summary(Pop, Bump, Push) end,
+    ?assertEqual([Summary(0, 1, []), Summary(1, 1, [0])], maps:get({a, a}, Summaries)),
+    ?assertEqual([Summary(0, 0, [0])], maps:get({c, a}, Summaries)),
+    ?assertEqual([Summary(0, 0, [0, 0])], maps:get({source, a}, Summaries)),
+    ?assertEqual([Summary(2, 0, [])], maps:get({a, sink}, Summaries)),
+    ?assertEqual([Summary(0, 0, [])], maps:get({source, sink}, Summaries)),
+    ?assertEqual([Summary(0, 1, [])], maps:get({c, c}, Summaries)),
+    ?assertEqual(
+        {5, [0, 1]},
+        ari_vtime:transfer(Summary(1, 1, [0]), {5, [3, 0]})
+    ),
+    ?assertNot(maps:is_key({sink, sink}, Summaries)),
+    ?assertNot(maps:is_key({source, source}, Summaries)).
 
 unconnected_output_test() ->
     Graph = ari_graph:graph([
