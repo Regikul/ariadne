@@ -7,6 +7,9 @@
 %%
 %% `new/2` создаёт прогон по программе: вызывает `init/1` каждого узла,
 %% наполняет входные очереди и ставит в `ready` начальные переходы.
+%% `advance/2` выполняет переходы: каждый шаг снимает с головы `ready`
+%% ребро или уведомление, вызывает callback узла и применяет результат
+%% целиком либо отбрасывает его, записывая нарушение.
 %%
 %% Собственных процессов модуль не создаёт; прогон идёт по месту вызова.
 %%
@@ -34,7 +37,7 @@
 
 -include("ariadne.hrl").
 
--export([compile/1, inspect/1, new/2]).
+-export([advance/2, compile/1, inspect/1, new/2]).
 -export_type([
     compile_error/0,
     exception/0,
@@ -146,6 +149,23 @@ new(#program{} = Program, Inputs) ->
     catch
         throw:{new_error, Reason} -> {error, Reason}
     end.
+
+%% @doc Выполняет до `Budget` шагов. `done` означает пустую `ready`,
+%% `more` — исчерпанный бюджет при оставшейся работе.
+-spec advance(execution(), pos_integer() | infinity) -> {done | more, execution()}.
+advance(#execution{ready = Ready} = Execution, 0) ->
+    case queue:is_empty(Ready) of
+        true -> {done, Execution};
+        false -> {more, Execution}
+    end;
+advance(#execution{} = Execution, Budget) ->
+    case step(Execution) of
+        none -> {done, Execution};
+        {ok, Next} -> advance(Next, spend(Budget))
+    end.
+
+spend(infinity) -> infinity;
+spend(Budget) -> Budget - 1.
 
 %% @doc Показывает содержимое программы или прогона в виде map.
 -spec inspect(program() | execution()) -> map().
@@ -450,3 +470,157 @@ schedule(#execution{program = Program, notify = Notify} = Execution) ->
 
 rejected(Reason) ->
     throw({new_error, Reason}).
+
+%% Шаг.
+
+%% @doc Выполняет один переход с головы `ready`. Возвращает `none`, если
+%% переходов нет.
+step(#execution{ready = Ready} = Execution) ->
+    case queue:out(Ready) of
+        {empty, _} ->
+            none;
+        {{value, Item}, Rest} ->
+            Next = transition(Item, Execution#execution{ready = Rest}),
+            {ok, Next#execution{steps = Next#execution.steps + 1}}
+    end.
+
+%% @doc Снимает сообщение с ребра и отдаёт узлу-получателю. Обработанное
+%% ребро возвращается в хвост `ready`, если в нём остались сообщения.
+%% Проверка запросов идёт после применения результата и только если
+%% исчез ключ `counts`.
+transition({edge, Name}, #execution{program = Program} = Execution) ->
+    #pedge{to = {Node, Slot}} = maps:get(Name, Program#program.edges),
+    {{value, {Message, Time}}, Queue} = queue:out(maps:get(Name, Execution#execution.queues)),
+    {Counts, Removed} = decrement({Node, Time}, Execution#execution.counts),
+    Consumed = Execution#execution{
+        queues = maps:put(Name, Queue, Execution#execution.queues),
+        counts = Counts
+    },
+    Callback = fun(Module, State) -> Module:handle_message(Slot, Message, Time, State) end,
+    Applied = invoke(Node, message, Time, Callback, Consumed),
+    Requeued =
+        case queue:is_empty(Queue) of
+            true -> Applied;
+            false -> Applied#execution{ready = queue:in({edge, Name}, Applied#execution.ready)}
+        end,
+    case Removed of
+        true -> schedule(Requeued);
+        false -> Requeued
+    end;
+%% @doc Снимает запрос и отметку `scheduled` и вызывает обработчик
+%% уведомления. Снятие запроса всегда запускает проверку ожидающих.
+transition({notify, Node, Time}, #execution{notify = Notify, scheduled = Scheduled} = Execution) ->
+    Consumed = Execution#execution{
+        notify = remove_request(Node, Time, Notify),
+        scheduled = maps:remove({Node, Time}, Scheduled)
+    },
+    Callback = fun(Module, State) -> Module:handle_notification(Time, State) end,
+    schedule(invoke(Node, notification, Time, Callback, Consumed)).
+
+%% @doc Вызывает callback узла и применяет его результат. Исключение в
+%% callback даёт `crash`, исключение при применении — `invalid_result`;
+%% в обоих случаях состояние узла и очереди остаются как после потребления
+%% события.
+invoke(Node, Kind, Time, Callback, #execution{program = Program, states = States} = Execution) ->
+    #pnode{module = Module} = maps:get(Node, Program#program.nodes),
+    State = maps:get(Node, States),
+    try Callback(Module, State) of
+        Result ->
+            case apply_result(Node, Kind, Time, Result, Execution) of
+                {ok, Applied} ->
+                    Applied;
+                {error, Exception} ->
+                    violate({invalid_result, Node, Kind, Time, Exception}, Execution)
+            end
+    catch
+        Class:Reason:Stack ->
+            violate({crash, Node, Kind, Time, {Class, Reason, Stack}}, Execution)
+    end.
+
+%% @doc Строит новое состояние исполнения из результата callback за один
+%% проход. Время каждого запроса и выхода сверяется с временем входа;
+%% нарушители отбрасываются с `time_rule`, остальное применяется.
+apply_result(Node, Kind, Time, Result, #execution{program = Program} = Execution) ->
+    #pnode{depth = Depth, outputs = Outputs} = maps:get(Node, Program#program.nodes),
+    try
+        {State, Requests, Emitted} = Result,
+        WithRequests = lists:foldl(
+            fun(Requested, Acc) ->
+                case allowed(Time, Requested, Depth) of
+                    true ->
+                        Acc#execution{notify = put_requests(Node, [Requested], Acc#execution.notify)};
+                    false ->
+                        violate({time_rule, Node, Kind, Time, Requested}, Acc)
+                end
+            end,
+            Execution,
+            Requests
+        ),
+        WithOutputs = lists:foldl(
+            fun({Slot, Message, Stamp}, Acc) ->
+                case allowed(Time, Stamp, Depth) of
+                    true ->
+                        Edges = maps:get(Slot, Outputs),
+                        lists:foldl(
+                            fun(Edge, Inner) -> deliver(Edge, Message, Stamp, Inner) end,
+                            Acc,
+                            Edges
+                        );
+                    false ->
+                        violate({time_rule, Node, Kind, Time, Stamp}, Acc)
+                end
+            end,
+            WithRequests,
+            Emitted
+        ),
+        {ok, WithOutputs#execution{states = maps:put(Node, State, WithOutputs#execution.states)}}
+    catch
+        Class:Reason:Stack ->
+            {error, {Class, Reason, Stack}}
+    end.
+
+%% @doc Проверяет время результата: оно имеет форму времени глубины узла
+%% и не раньше входного. Время не той формы — исключение и `invalid_result`.
+allowed(InputTime, Time, Depth) ->
+    ari_vtime:valid(Time, Depth) orelse erlang:error({invalid_time, Time}),
+    ari_vtime:le(InputTime, Time).
+
+%% @doc Кладёт сообщение в очередь ребра, преобразуя время по виду ребра.
+%% Ребро с получателем учитывается в `counts` и встаёт в `ready`, если его
+%% очередь была пуста.
+deliver(Name, Message, Time, #execution{program = Program, queues = Queues} = Execution) ->
+    #pedge{kind = Kind, to = To} = maps:get(Name, Program#program.edges),
+    Arrival = transform(Kind, Time),
+    Queue = maps:get(Name, Queues),
+    Delivered = Execution#execution{queues = maps:put(Name, queue:in({Message, Arrival}, Queue), Queues)},
+    case To of
+        undefined ->
+            Delivered;
+        {Node, _Slot} ->
+            Counted = Delivered#execution{counts = increment({Node, Arrival}, Delivered#execution.counts)},
+            case queue:is_empty(Queue) of
+                true -> Counted#execution{ready = queue:in({edge, Name}, Counted#execution.ready)};
+                false -> Counted
+            end
+    end.
+
+transform(message, Time) -> Time;
+transform(ingress, Time) -> ari_vtime:ingress(Time);
+transform(feedback, Time) -> ari_vtime:feedback(Time);
+transform(egress, Time) -> ari_vtime:egress(Time).
+
+%% @doc Уменьшает счётчик pointstamp'а и сообщает, исчез ли ключ.
+decrement(Key, Counts) ->
+    case maps:get(Key, Counts) of
+        1 -> {maps:remove(Key, Counts), true};
+        Count -> {maps:put(Key, Count - 1, Counts), false}
+    end.
+
+remove_request(Node, Time, Notify) ->
+    case ordsets:del_element(Time, maps:get(Node, Notify)) of
+        [] -> maps:remove(Node, Notify);
+        Rest -> maps:put(Node, Rest, Notify)
+    end.
+
+violate(Violation, #execution{violations = Violations} = Execution) ->
+    Execution#execution{violations = Violations ++ [Violation]}.
