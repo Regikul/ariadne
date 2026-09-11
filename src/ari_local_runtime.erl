@@ -37,13 +37,14 @@
 
 -include("ariadne.hrl").
 
--export([advance/2, compile/1, inspect/1, new/2]).
+-export([advance/2, compile/1, inspect/1, new/2, outputs/1, steps/1, violations/1]).
 -export_type([
     compile_error/0,
     exception/0,
     execution/0,
     inputs/0,
     new_error/0,
+    outputs/0,
     program/0,
     violation/0
 ]).
@@ -58,6 +59,8 @@
     | {unknown_output_slot, name(), name(), slot()}.
 
 -type inputs() :: [{name(), [{term(), ari_vtime:t()}]}].
+
+-type outputs() :: #{name() => [{term(), ari_vtime:t()}]}.
 
 -type exception() :: {error | exit | throw, term(), [term()]}.
 
@@ -150,8 +153,10 @@ new(#program{} = Program, Inputs) ->
         throw:{new_error, Reason} -> {error, Reason}
     end.
 
-%% @doc Выполняет до `Budget` шагов. `done` означает пустую `ready`,
-%% `more` — исчерпанный бюджет при оставшейся работе.
+%% @doc Выполняет до `Budget` шагов. `done` означает покой: `ready` пуста,
+%% и по свойству допустимости запросов уведомлений тогда не остаётся.
+%% `more` — исчерпанный бюджет при оставшейся работе. С `infinity`
+%% расходящийся граф не возвращается.
 -spec advance(execution(), pos_integer() | infinity) -> {done | more, execution()}.
 advance(#execution{ready = Ready} = Execution, 0) ->
     case queue:is_empty(Ready) of
@@ -166,6 +171,21 @@ advance(#execution{} = Execution, Budget) ->
 
 spend(infinity) -> infinity;
 spend(Budget) -> Budget - 1.
+
+%% @doc Возвращает содержимое выходных полурёбер в порядке очередей.
+-spec outputs(execution()) -> outputs().
+outputs(#execution{program = #program{outputs = Outputs}, queues = Queues}) ->
+    maps:from_list([{Name, queue:to_list(maps:get(Name, Queues))} || Name <- Outputs]).
+
+%% @doc Возвращает нарушения в порядке возникновения.
+-spec violations(execution()) -> [violation()].
+violations(#execution{violations = Violations}) ->
+    Violations.
+
+%% @doc Возвращает число выполненных переходов.
+-spec steps(execution()) -> non_neg_integer().
+steps(#execution{steps = Steps}) ->
+    Steps.
 
 %% @doc Показывает содержимое программы или прогона в виде map.
 -spec inspect(program() | execution()) -> map().

@@ -8,6 +8,8 @@
 %% - `initial` — запросы уведомлений из `init/1`, по умолчанию `[]`;
 %% - `on_notify` — map «время уведомления => запросы», которые обработчик
 %%   уведомления делает один раз, после чего запись удаляется;
+%% - `forever` — список времён, которые обработчик уведомления запрашивает
+%%   снова на каждом срабатывании; такой узел не останавливается;
 %% - `crash_on` — список времён, уведомление о которых бросает `error(boom)`.
 -module(ari_notify_node).
 
@@ -42,6 +44,7 @@ handle_message(input, Message, Time, #{pending := Pending} = State) ->
 handle_notification(Time, #{pending := Pending} = State) ->
     lists:member(Time, maps:get(crash_on, State, [])) andalso erlang:error(boom),
     OnNotify = maps:get(on_notify, State, #{}),
-    Requests = maps:get(Time, OnNotify, []),
+    Forever = [Time || lists:member(Time, maps:get(forever, State, []))],
+    Requests = maps:get(Time, OnNotify, []) ++ Forever,
     NewState = State#{pending := maps:remove(Time, Pending), on_notify => maps:remove(Time, OnNotify)},
     {NewState, Requests, [{output, {batch, maps:get(Time, Pending, [])}, Time}]}.
