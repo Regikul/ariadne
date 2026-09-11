@@ -20,14 +20,12 @@ linear_graph_test() ->
                     module => ari_test_node,
                     args => #{},
                     depth => 0,
-                    inputs => #{input => [input]},
                     outputs => #{output => [a_to_b]}
                 },
                 b => #{
                     module => ari_test_node,
                     args => #{},
                     depth => 0,
-                    inputs => #{input => [a_to_b]},
                     outputs => #{output => [output]}
                 }
             },
@@ -72,7 +70,6 @@ loop_graph_test() ->
         },
         Edges
     ),
-    ?assertEqual(#{input => [input, next]}, maps:get(inputs, maps:get(a, Nodes))),
     ?assertEqual([0, 0, 1, 1], [maps:get(depth, maps:get(N, Nodes)) || N <- [source, sink, a, b]]),
     ?assertEqual(#{output => [next, output]}, maps:get(outputs, maps:get(b, Nodes))),
     ?assertEqual([], Inputs),
@@ -233,10 +230,15 @@ new_loads_inputs_test() ->
         #{
             states => #{a => state_a, b => state_b},
             queues => #{input => [{m1, {5, []}}, {m2, {5, []}}, {m3, {6, []}}], a_to_b => [], output => []},
-            counts => #{{a, {5, []}} => 2, {a, {6, []}} => 1},
+            counts => #{a => #{{5, []} => 2, {6, []} => 1}},
             notify => #{},
             ready => [{edge, input}],
             scheduled => #{},
+            messages => #{},
+            requests => #{},
+            stale => all,
+            blockers => #{},
+            candidates => [],
             steps => 0,
             violations => []
         },
@@ -350,5 +352,5 @@ runs_are_independent_test() ->
     {ok, First} = ari_local_runtime:new(Program, [{input, [{m1, {5, []}}]}]),
     {ok, Second} = ari_local_runtime:new(Program, [{input, [{m2, {6, []}}]}]),
     ?assertEqual(Before, ari_local_runtime:inspect(Program)),
-    ?assertEqual(#{{a, {5, []}} => 1}, maps:get(counts, ari_local_runtime:inspect(First))),
-    ?assertEqual(#{{a, {6, []}} => 1}, maps:get(counts, ari_local_runtime:inspect(Second))).
+    ?assertEqual(#{a => #{{5, []} => 1}}, maps:get(counts, ari_local_runtime:inspect(First))),
+    ?assertEqual(#{a => #{{6, []} => 1}}, maps:get(counts, ari_local_runtime:inspect(Second))).

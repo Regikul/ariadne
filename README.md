@@ -33,4 +33,5 @@ Naiad.
 
 ```console
 rebar3 compile
+rebar3 test    # eunit и покрытие
 ```

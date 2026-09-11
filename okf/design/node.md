@@ -47,3 +47,7 @@ handle_notification(Time, State) ->
 
 Время передаётся отдельно от сообщения. Функция `time(Message)` в API Ariadne не
 нужна.
+
+Времена в `Notifications` и `Outputs` не раньше `Time` по `ari_vtime:le/2`;
+правило и последствия его нарушения описаны в
+[правиле времени узла](local-runtime.md#правило-времени-узла).

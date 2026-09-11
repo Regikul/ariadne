@@ -11,7 +11,7 @@
 %% `dominates/2` сравнивает сводки одной формы.
 -module(ari_vtime).
 
--export([egress/1, feedback/1, ingress/1, le/2, new/1, valid/2]).
+-export([egress/1, feedback/1, ingress/1, le/2, new/1, sort/1, valid/2]).
 -export([compose/2, dominates/2, summary/1, summary/3, transfer/2]).
 -export_type([kind/0, summary/0, t/0]).
 
@@ -64,6 +64,18 @@ valid(_Term, _Depth) ->
 -spec le(t(), t()) -> boolean().
 le({TimeA, IterationsA}, {TimeB, IterationsB}) ->
     TimeA =< TimeB andalso iterations_compare(IterationsA, IterationsB) =/= greater.
+
+%% @doc Сортирует времена одной глубины по эпохе, затем лексикографически
+%% по итерациям от внешнего цикла к внутреннему. Порядок линеен и
+%% согласован с `le/2`: меньшее по `le/2` время стоит раньше. Порядок
+%% термов Erlang для этого не годится: он сравнивает список итераций
+%% с головы, то есть с внутреннего цикла.
+%% Ключ с развёрнутым списком итераций сортируется встроенным порядком
+%% термов, что быстрее сортировки с функцией сравнения.
+-spec sort([t()]) -> [t()].
+sort(Times) ->
+    Keyed = [{{Epoch, lists:reverse(Iterations)}, Time} || {Epoch, Iterations} = Time <- Times],
+    [Time || {_Key, Time} <- lists:sort(Keyed)].
 
 iterations_compare([], []) ->
     equal;

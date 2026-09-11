@@ -85,9 +85,7 @@
     %% Глубина времени узла: число охватывающих циклов.
     depth :: non_neg_integer(),
     %% Рёбра каждого объявленного выходного слота в порядке `edge_order`.
-    outputs :: #{slot() => [name()]},
-    %% Рёбра каждого объявленного входного слота в порядке `edge_order`.
-    inputs :: #{slot() => [name()]}
+    outputs :: #{slot() => [name()]}
 }).
 
 -record(pedge, {
@@ -119,7 +117,19 @@
     ready :: queue:queue(item()),
     %% Уведомления, уже поставленные в `ready`.
     scheduled :: #{{name(), ari_vtime:t()} => true},
+    %% Фронтиры `counts` и `notify`; узел из `stale` пересобирается перед
+    %% следующей проверкой. До первого запроса в прогоне фронтиры не
+    %% поддерживаются: `stale = all`, и первая проверка строит их заново.
+    messages :: ari_progress:frontier(),
+    requests :: ari_progress:frontier(),
+    stale :: all | #{{message | request, name()} => true},
+    %% Свидетель каждого заблокированного запроса: время фронтира, которое
+    %% его блокирует. Исчезновение свидетеля возвращает запросы в проверку.
+    blockers :: #{ari_progress:blocker() => [{name(), ari_vtime:t()}]},
+    %% Запросы, ожидающие проверки: новые и освобождённые свидетелем.
+    candidates :: [{name(), ari_vtime:t()}],
     steps = 0 :: non_neg_integer(),
+    %% Нарушения в обратном порядке: новое в голове списка.
     violations = [] :: [violation()]
 }).
 
@@ -180,7 +190,7 @@ outputs(#execution{program = #program{outputs = Outputs}, queues = Queues}) ->
 %% @doc Возвращает нарушения в порядке возникновения.
 -spec violations(execution()) -> [violation()].
 violations(#execution{violations = Violations}) ->
-    Violations.
+    lists:reverse(Violations).
 
 %% @doc Возвращает число выполненных переходов.
 -spec steps(execution()) -> non_neg_integer().
@@ -198,8 +208,13 @@ inspect(#execution{} = Execution) ->
         notify => Execution#execution.notify,
         ready => queue:to_list(Execution#execution.ready),
         scheduled => Execution#execution.scheduled,
+        messages => Execution#execution.messages,
+        requests => Execution#execution.requests,
+        stale => Execution#execution.stale,
+        blockers => Execution#execution.blockers,
+        candidates => Execution#execution.candidates,
         steps => Execution#execution.steps,
-        violations => Execution#execution.violations
+        violations => lists:reverse(Execution#execution.violations)
     };
 inspect(#program{} = Program) ->
     #{
@@ -212,8 +227,8 @@ inspect(#program{} = Program) ->
         summaries => Program#program.summaries
     }.
 
-inspect_node(#pnode{module = Module, args = Args, depth = Depth, outputs = Outputs, inputs = Inputs}) ->
-    #{module => Module, args => Args, depth => Depth, outputs => Outputs, inputs => Inputs}.
+inspect_node(#pnode{module = Module, args = Args, depth = Depth, outputs = Outputs}) ->
+    #{module => Module, args => Args, depth => Depth, outputs => Outputs}.
 
 inspect_edge(#pedge{kind = Kind, loop = Loop, from = From, to = To}) ->
     #{kind => Kind, loop => Loop, from => From, to => To}.
@@ -239,42 +254,42 @@ build(Nodes, Edges) ->
     }.
 
 %% @doc Считает минимальные сводки непустых путей. Начальные сводки берутся
-%% из рёбер с обоими концами; каждый найденный путь продолжается ещё одним
-%% ребром до неподвижной точки. Доминируемые сводки отбрасываются, поэтому
-%% лишние обороты циклов вычисление не продлевают.
+%% из рёбер с обоими концами; каждая сводка, попавшая в таблицу,
+%% продолжается каждым ребром из своего конца, пока список необработанных
+%% не опустеет. Доминируемые сводки отбрасываются, поэтому лишние обороты
+%% циклов вычисление не продлевают. Продолжение сводки, вытесненной позже,
+%% доминируется продолжением вытеснившей и таблицы не меняет.
 summaries(EdgeOrder, Edges) ->
-    Arcs = [
-        {From, To, Kind}
-     || Name <- EdgeOrder,
-        #pedge{kind = Kind, from = {From, _}, to = {To, _}} <- [maps:get(Name, Edges)]
-    ],
-    Initial = lists:foldl(
-        fun({From, To, Kind}, Table) ->
-            add_summary({From, To}, ari_vtime:summary(Kind), Table)
+    Arcs = lists:foldr(
+        fun(Name, Acc) ->
+            case maps:get(Name, Edges) of
+                #pedge{kind = Kind, from = {From, _}, to = {To, _}} ->
+                    maps:update_with(From, fun(Out) -> [{To, Kind} | Out] end, [{To, Kind}], Acc);
+                #pedge{} ->
+                    Acc
+            end
         end,
         #{},
-        Arcs
+        EdgeOrder
     ),
-    extend_summaries(Initial, Arcs).
+    Initial = [
+        {From, To, ari_vtime:summary(Kind)}
+     || From <- lists:sort(maps:keys(Arcs)), {To, Kind} <- maps:get(From, Arcs)
+    ],
+    extend_summaries(Initial, #{}, Arcs).
 
-extend_summaries(Table, Arcs) ->
-    Extended = maps:fold(
-        fun({From, Via}, Summaries, Acc) ->
-            lists:foldl(
-                fun({Summary, {_Via, To, Kind}}, Inner) ->
-                    Composed = ari_vtime:compose(Summary, ari_vtime:summary(Kind)),
-                    add_summary({From, To}, Composed, Inner)
-                end,
-                Acc,
-                [{Summary, Arc} || Summary <- Summaries, {V, _, _} = Arc <- Arcs, V =:= Via]
-            )
-        end,
-        Table,
-        Table
-    ),
-    case Extended =:= Table of
-        true -> Table;
-        false -> extend_summaries(Extended, Arcs)
+extend_summaries([], Table, _Arcs) ->
+    Table;
+extend_summaries([{From, Via, Summary} | Pending], Table, Arcs) ->
+    case add_summary({From, Via}, Summary, Table) of
+        Table ->
+            extend_summaries(Pending, Table, Arcs);
+        Extended ->
+            Next = [
+                {From, To, ari_vtime:compose(Summary, ari_vtime:summary(Kind))}
+             || {To, Kind} <- maps:get(Via, Arcs, [])
+            ],
+            extend_summaries(Next ++ Pending, Extended, Arcs)
     end.
 
 %% @doc Добавляет сводку в антицепь пары узлов. Антицепь хранится
@@ -306,22 +321,21 @@ node_slots(#node{name = Name, module = Module}) ->
     ),
     {Module:input(), Module:output()}.
 
-%% @doc Строит индексы маршрутизации узла. Объявленный слот без рёбер
-%% получает пустой список, чем отличается от неизвестного слота.
-pnode(#node{name = Name, module = Module, args = Args, context = Context}, {Inputs, Outputs}, EdgeOrder, Edges) ->
+%% @doc Строит индекс маршрутизации узла. Объявленный выходной слот без
+%% рёбер получает пустой список, чем отличается от неизвестного слота.
+pnode(#node{name = Name, module = Module, args = Args, context = Context}, {_Inputs, Outputs}, EdgeOrder, Edges) ->
     #pnode{
         module = Module,
         args = Args,
         depth = length(Context),
-        outputs = slot_edges(Name, Outputs, #pedge.from, EdgeOrder, Edges),
-        inputs = slot_edges(Name, Inputs, #pedge.to, EdgeOrder, Edges)
+        outputs = slot_edges(Name, Outputs, EdgeOrder, Edges)
     }.
 
-slot_edges(Node, Slots, Field, EdgeOrder, Edges) ->
+slot_edges(Node, Slots, EdgeOrder, Edges) ->
     Empty = maps:from_list([{Slot, []} || Slot <- Slots]),
     lists:foldr(
         fun(Name, Acc) ->
-            case element(Field, maps:get(Name, Edges)) of
+            case (maps:get(Name, Edges))#pedge.from of
                 {Node, Slot} -> maps:update_with(Slot, fun(Names) -> [Name | Names] end, Acc);
                 _Other -> Acc
             end
@@ -369,12 +383,13 @@ invalid(Reason) ->
 
 initialize(#program{node_order = NodeOrder} = Program, Inputs) ->
     validate_inputs(Program, Inputs, []),
-    {States, Notify} = lists:foldl(
-        fun(Name, {States, Notify}) ->
+    {States, Notify, Candidates} = lists:foldl(
+        fun(Name, {States, Notify, Candidates}) ->
             {State, Requests} = init_node(Name, maps:get(Name, Program#program.nodes)),
-            {States#{Name => State}, put_requests(Name, Requests, Notify)}
+            {Added, NewNotify} = put_requests(Name, Requests, Notify),
+            {States#{Name => State}, NewNotify, [{Name, Time} || Time <- Added] ++ Candidates}
         end,
-        {#{}, #{}},
+        {#{}, #{}, []},
         NodeOrder
     ),
     {Queues, Counts} = load_inputs(Program, Inputs),
@@ -389,7 +404,12 @@ initialize(#program{node_order = NodeOrder} = Program, Inputs) ->
         counts = Counts,
         notify = Notify,
         ready = Ready,
-        scheduled = #{}
+        scheduled = #{},
+        messages = #{},
+        requests = #{},
+        stale = all,
+        blockers = #{},
+        candidates = Candidates
     }).
 
 validate_inputs(_Program, [], _Seen) ->
@@ -431,12 +451,129 @@ init_node(Name, #pnode{module = Module, args = Args, depth = Depth}) ->
     ),
     {State, Requests}.
 
-%% @doc Добавляет запросы узла в `notify`; узлы без запросов ключа не имеют.
-put_requests(_Name, [], Notify) ->
-    Notify;
+%% @doc Добавляет запросы узла в `notify` и возвращает новые времена;
+%% узлы без запросов ключа не имеют.
 put_requests(Name, Requests, Notify) ->
     Known = maps:get(Name, Notify, ordsets:new()),
-    maps:put(Name, ordsets:union(ordsets:from_list(Requests), Known), Notify).
+    case ordsets:union(ordsets:from_list(Requests), Known) of
+        Known -> {[], Notify};
+        Merged -> {ordsets:subtract(Merged, Known), maps:put(Name, Merged, Notify)}
+    end.
+
+%% @doc Записывает запрос узла: кладёт в `notify`, фронтир запросов и
+%% кандидаты на проверку; повторный запрос известного времени ничего не
+%% меняет.
+request(Node, Time, #execution{notify = Notify} = Execution) ->
+    case put_requests(Node, [Time], Notify) of
+        {[], Notify} ->
+            Execution;
+        {[Time], Updated} ->
+            Inserted = insert(request, Node, Time, Execution#execution{notify = Updated}),
+            Inserted#execution{candidates = [{Node, Time} | Inserted#execution.candidates]}
+    end.
+
+%% Фронтиры.
+
+%% @doc Добавляет время в фронтир узла. Свидетели вытесненных времён
+%% переходят к новому: меньшее время блокирует всё, что блокировали они.
+%% Устаревший фронтир узла пересобирается целиком, и вставка пропускается.
+insert(_Kind, _Node, _Time, #execution{stale = all} = Execution) ->
+    Execution;
+insert(Kind, Node, Time, #execution{stale = Stale, blockers = Blockers} = Execution) ->
+    case maps:is_key({Kind, Node}, Stale) of
+        true ->
+            Execution;
+        false ->
+            {Frontier, Dropped} = ari_progress:insert(Node, Time, frontier(Kind, Execution)),
+            Moved = lists:foldl(
+                fun(Old, Acc) ->
+                    case maps:take({Kind, Node, Old}, Acc) of
+                        error -> Acc;
+                        {Witnessed, Rest} -> maps:update_with({Kind, Node, Time}, fun(Known) -> Witnessed ++ Known end, Witnessed, Rest)
+                    end
+                end,
+                Blockers,
+                Dropped
+            ),
+            set_frontier(Kind, Frontier, Execution#execution{blockers = Moved})
+    end.
+
+%% @doc Учитывает исчезновение времени узла: запросы, которым оно
+%% свидетельствовало блокировку, возвращаются в кандидаты, а фронтир узла
+%% помечается устаревшим. Сообщение снимается с ребра в порядке очереди и
+%% минимальным обычно не является, поэтому фронтир сообщений помечается,
+%% только если время в него входило: исчезновение неминимального времени
+%% минимумов не меняет. Запрос исполняется допустимым и обычно минимален,
+%% и его снятие помечает узел без обхода фронтира. До первого запроса
+%% свидетелей нет и помечать нечего.
+release(_Kind, _Node, _Time, #execution{stale = all} = Execution) ->
+    Execution;
+release(Kind, Node, Time, #execution{stale = Stale, blockers = Blockers} = Execution) ->
+    {Released, Rest} =
+        case maps:take({Kind, Node, Time}, Blockers) of
+            error -> {[], Blockers};
+            Taken -> Taken
+        end,
+    Marked =
+        case Kind =:= request orelse lists:member(Time, maps:get(Node, frontier(message, Execution), [])) of
+            true -> Stale#{{Kind, Node} => true};
+            false -> Stale
+        end,
+    Execution#execution{
+        stale = Marked,
+        blockers = Rest,
+        candidates = Released ++ Execution#execution.candidates
+    }.
+
+%% @doc Пересобирает устаревшие фронтиры. Время, выпавшее из фронтира при
+%% пересборке, освобождает своих свидетельствуемых: их блокирует меньшее
+%% время, всплывшее на его место, и проверка найдёт нового свидетеля.
+refresh(#execution{stale = all} = Execution) ->
+    Execution#execution{
+        messages = exact(message, Execution),
+        requests = exact(request, Execution),
+        stale = #{}
+    };
+refresh(#execution{stale = Stale} = Execution) ->
+    Rebuilt = maps:fold(
+        fun({Kind, Node}, true, Acc) ->
+            Old = maps:get(Node, frontier(Kind, Acc), []),
+            New = ari_progress:minimal(times(Kind, Node, Acc)),
+            Released = lists:foldl(
+                fun(Time, Inner) ->
+                    case lists:member(Time, New) of
+                        true -> Inner;
+                        false -> release(Kind, Node, Time, Inner)
+                    end
+                end,
+                Acc,
+                Old
+            ),
+            Frontier = frontier(Kind, Released),
+            Updated =
+                case New of
+                    [] -> maps:remove(Node, Frontier);
+                    _ -> maps:put(Node, New, Frontier)
+                end,
+            set_frontier(Kind, Updated, Released)
+        end,
+        Execution,
+        Stale
+    ),
+    Rebuilt#execution{stale = #{}}.
+
+exact(message, #execution{counts = Counts}) -> ari_progress:message_frontier(Counts);
+exact(request, #execution{notify = Notify}) -> ari_progress:request_frontier(Notify).
+
+%% @doc Времена узла среди живых сообщений или запросов.
+times(message, Node, #execution{counts = Counts}) -> maps:keys(maps:get(Node, Counts, #{}));
+times(request, Node, #execution{notify = Notify}) -> maps:get(Node, Notify, []).
+
+frontier(message, #execution{messages = Messages}) -> Messages;
+frontier(request, #execution{requests = Requests}) -> Requests.
+
+set_frontier(message, Frontier, Execution) -> Execution#execution{messages = Frontier};
+set_frontier(request, Frontier, Execution) -> Execution#execution{requests = Frontier}.
 
 %% @doc Заводит очередь на каждое ребро и кладёт вход во входные очереди,
 %% считая сообщения по pointstamp'ам узла-получателя.
@@ -446,7 +583,7 @@ load_inputs(#program{edge_order = EdgeOrder, edges = Edges}, Inputs) ->
         fun({Name, Messages}, {Queues, Counts}) ->
             #pedge{to = {Node, _Slot}} = maps:get(Name, Edges),
             NewCounts = lists:foldl(
-                fun({_Message, Time}, Acc) -> increment({Node, Time}, Acc) end,
+                fun({_Message, Time}, Acc) -> increment(Node, Time, Acc) end,
                 Counts,
                 Messages
             ),
@@ -456,36 +593,42 @@ load_inputs(#program{edge_order = EdgeOrder, edges = Edges}, Inputs) ->
         Inputs
     ).
 
-increment(Key, Counts) ->
-    maps:update_with(Key, fun(Count) -> Count + 1 end, 1, Counts).
+increment(Node, Time, Counts) ->
+    Times = maps:get(Node, Counts, #{}),
+    maps:put(Node, maps:update_with(Time, fun(Count) -> Count + 1 end, 1, Times), Counts).
 
-%% @doc Ставит в хвост `ready` допустимые запросы, ещё не поставленные:
-%% узлы в `node_order`, времена внутри узла в порядке термов.
-schedule(#execution{program = Program, notify = Notify} = Execution) ->
-    #program{node_order = NodeOrder, summaries = Summaries} = Program,
+%% @doc Ставит в хвост `ready` допустимые кандидаты: узлы в `node_order`,
+%% времена внутри узла в порядке термов — порядок термов пар даёт то же.
+%% Заблокированный кандидат получает свидетеля и ждёт его исчезновения.
+%% Без кандидатов проверять нечего, и устаревшие фронтиры ждут следующей
+%% проверки.
+schedule(#execution{candidates = []} = Execution) ->
+    Execution;
+schedule(#execution{} = Execution) ->
+    Refreshed = refresh(Execution),
+    Candidates = lists:usort(Refreshed#execution.candidates),
+    check(Candidates, Refreshed#execution{candidates = []}).
+
+check(Candidates, #execution{program = Program, messages = Messages, requests = Requests} = Execution) ->
+    #program{summaries = Summaries} = Program,
     lists:foldl(
-        fun(Name, Acc) ->
-            lists:foldl(
-                fun(Time, #execution{scheduled = Scheduled, ready = Ready} = Inner) ->
-                    case
-                        not maps:is_key({Name, Time}, Scheduled) andalso
-                            ari_progress:admissible(Name, Time, Inner#execution.counts, Notify, Summaries)
-                    of
-                        true ->
-                            Inner#execution{
-                                ready = queue:in({notify, Name, Time}, Ready),
-                                scheduled = Scheduled#{{Name, Time} => true}
-                            };
-                        false ->
-                            Inner
-                    end
-                end,
-                Acc,
-                maps:get(Name, Notify, [])
-            )
+        fun({Name, Time} = Request, #execution{scheduled = Scheduled, ready = Ready} = Acc) ->
+            case ari_progress:blocker(Name, Time, Messages, Requests, Summaries) of
+                none ->
+                    Acc#execution{
+                        ready = queue:in({notify, Name, Time}, Ready),
+                        scheduled = Scheduled#{Request => true}
+                    };
+                Blocker ->
+                    Acc#execution{
+                        blockers = maps:update_with(
+                            Blocker, fun(Known) -> [Request | Known] end, [Request], Acc#execution.blockers
+                        )
+                    }
+            end
         end,
         Execution,
-        NodeOrder
+        Candidates
     ).
 
 rejected(Reason) ->
@@ -511,11 +654,7 @@ step(#execution{ready = Ready} = Execution) ->
 transition({edge, Name}, #execution{program = Program} = Execution) ->
     #pedge{to = {Node, Slot}} = maps:get(Name, Program#program.edges),
     {{value, {Message, Time}}, Queue} = queue:out(maps:get(Name, Execution#execution.queues)),
-    {Counts, Removed} = decrement({Node, Time}, Execution#execution.counts),
-    Consumed = Execution#execution{
-        queues = maps:put(Name, Queue, Execution#execution.queues),
-        counts = Counts
-    },
+    {Consumed, Removed} = consume({Node, Time}, Execution#execution{queues = maps:put(Name, Queue, Execution#execution.queues)}),
     Callback = fun(Module, State) -> Module:handle_message(Slot, Message, Time, State) end,
     Applied = invoke(Node, message, Time, Callback, Consumed),
     Requeued =
@@ -530,10 +669,10 @@ transition({edge, Name}, #execution{program = Program} = Execution) ->
 %% @doc Снимает запрос и отметку `scheduled` и вызывает обработчик
 %% уведомления. Снятие запроса всегда запускает проверку ожидающих.
 transition({notify, Node, Time}, #execution{notify = Notify, scheduled = Scheduled} = Execution) ->
-    Consumed = Execution#execution{
+    Consumed = release(request, Node, Time, Execution#execution{
         notify = remove_request(Node, Time, Notify),
         scheduled = maps:remove({Node, Time}, Scheduled)
-    },
+    }),
     Callback = fun(Module, State) -> Module:handle_notification(Time, State) end,
     schedule(invoke(Node, notification, Time, Callback, Consumed)).
 
@@ -568,7 +707,7 @@ apply_result(Node, Kind, Time, Result, #execution{program = Program} = Execution
             fun(Requested, Acc) ->
                 case allowed(Time, Requested, Depth) of
                     true ->
-                        Acc#execution{notify = put_requests(Node, [Requested], Acc#execution.notify)};
+                        request(Node, Requested, Acc);
                     false ->
                         violate({time_rule, Node, Kind, Time, Requested}, Acc)
                 end
@@ -617,7 +756,7 @@ deliver(Name, Message, Time, #execution{program = Program, queues = Queues} = Ex
         undefined ->
             Delivered;
         {Node, _Slot} ->
-            Counted = Delivered#execution{counts = increment({Node, Arrival}, Delivered#execution.counts)},
+            Counted = produce({Node, Arrival}, Delivered),
             case queue:is_empty(Queue) of
                 true -> Counted#execution{ready = queue:in({edge, Name}, Counted#execution.ready)};
                 false -> Counted
@@ -629,11 +768,29 @@ transform(ingress, Time) -> ari_vtime:ingress(Time);
 transform(feedback, Time) -> ari_vtime:feedback(Time);
 transform(egress, Time) -> ari_vtime:egress(Time).
 
-%% @doc Уменьшает счётчик pointstamp'а и сообщает, исчез ли ключ.
-decrement(Key, Counts) ->
-    case maps:get(Key, Counts) of
-        1 -> {maps:remove(Key, Counts), true};
-        Count -> {maps:put(Key, Count - 1, Counts), false}
+%% @doc Учитывает новое сообщение в `counts`; новый ключ входит в фронтир
+%% сообщений, если его не доминирует известное время.
+produce({Node, Time}, #execution{counts = Counts} = Execution) ->
+    Counted = Execution#execution{counts = increment(Node, Time, Counts)},
+    case maps:is_key(Time, maps:get(Node, Counts, #{})) of
+        true -> Counted;
+        false -> insert(message, Node, Time, Counted)
+    end.
+
+%% @doc Снимает сообщение со счёта и сообщает, исчез ли ключ. Исчезнувший
+%% ключ освобождает запросы, которым свидетельствовал.
+consume({Node, Time}, #execution{counts = Counts} = Execution) ->
+    Times = maps:get(Node, Counts),
+    case maps:get(Time, Times) of
+        1 ->
+            Remaining =
+                case maps:remove(Time, Times) of
+                    Empty when map_size(Empty) =:= 0 -> maps:remove(Node, Counts);
+                    Rest -> maps:put(Node, Rest, Counts)
+                end,
+            {release(message, Node, Time, Execution#execution{counts = Remaining}), true};
+        Count ->
+            {Execution#execution{counts = maps:put(Node, maps:put(Time, Count - 1, Times), Counts)}, false}
     end.
 
 remove_request(Node, Time, Notify) ->
@@ -643,4 +800,4 @@ remove_request(Node, Time, Notify) ->
     end.
 
 violate(Violation, #execution{violations = Violations} = Execution) ->
-    Execution#execution{violations = Violations ++ [Violation]}.
+    Execution#execution{violations = [Violation | Violations]}.

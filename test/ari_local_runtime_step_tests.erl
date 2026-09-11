@@ -45,7 +45,7 @@ message_step_test() ->
         #{input => [{m2, {5, []}}, {m3, {6, []}}], a_to_b => [{m1, {5, []}}], a_to_c => [{m1, {5, []}}], out_b => [], out_c => []},
         Queues
     ),
-    ?assertEqual(#{{a, {5, []}} => 1, {a, {6, []}} => 1, {b, {5, []}} => 1, {c, {5, []}} => 1}, Counts),
+    ?assertEqual(#{a => #{{5, []} => 1, {6, []} => 1}, b => #{{5, []} => 1}, c => #{{5, []} => 1}}, Counts),
     ?assertEqual([{edge, a_to_b}, {edge, a_to_c}, {edge, input}], Ready),
     ?assertEqual({#{}, 1}, maps:get(a, States)),
     ?assertEqual(1, Steps).
@@ -91,7 +91,7 @@ edges_transform_time_test() ->
     AfterFeedback = steps(AfterBody, 1),
     #{queues := Queues, counts := Counts} = inspect(AfterFeedback),
     ?assertEqual([{m, {5, [1]}}], maps:get(next, Queues)),
-    ?assertEqual(#{{body, {5, [1]}} => 1}, Counts),
+    ?assertEqual(#{body => #{{5, [1]} => 1}}, Counts),
     {done, Done} = ari_local_runtime:advance(AfterFeedback, infinity),
     #{queues := FinalQueues, steps := Steps, violations := Violations} = inspect(Done),
     ?assertEqual([{m, {5, []}}], maps:get(output, FinalQueues)),
@@ -234,3 +234,56 @@ crash_in_notification_test() ->
     ?assertEqual(#{}, Notify),
     ?assertEqual([], Ready),
     ?assertEqual(#{}, Scheduled).
+
+%% Обработчик уведомления `4` запрашивает `5`, пока `6` уже стоит в
+%% `ready`: в ациклическом узле запросы друг друга не блокируют, поэтому
+%% `5` встаёт в хвост за `6`, а `6` исполняется, не будучи минимумом
+%% фронтира запросов.
+later_request_below_scheduled_test() ->
+    Items = notify_items(#{initial => [{4, []}, {6, []}], on_notify => #{{4, []} => [{5, []}]}}),
+    Execution = start(Items, []),
+    ?assertEqual([{notify, a, {4, []}}, {notify, a, {6, []}}], maps:get(ready, inspect(Execution))),
+    AfterFirst = steps(Execution, 1),
+    #{ready := Ready, requests := Requests} = inspect(AfterFirst),
+    ?assertEqual([{notify, a, {6, []}}, {notify, a, {5, []}}], Ready),
+    ?assertEqual(#{a => [{5, []}]}, Requests),
+    AfterSecond = steps(AfterFirst, 1),
+    #{notify := Notify, requests := Remaining, scheduled := Scheduled} = inspect(AfterSecond),
+    ?assertEqual(#{a => [{5, []}]}, Notify),
+    ?assertEqual(#{a => [{5, []}]}, Remaining),
+    ?assertEqual(#{{a, {5, []}} => true}, Scheduled),
+    {done, Done} = ari_local_runtime:advance(AfterSecond, infinity),
+    ?assertEqual(
+        [{{batch, []}, {4, []}}, {{batch, []}, {6, []}}, {{batch, []}, {5, []}}],
+        maps:get(output, ari_local_runtime:outputs(Done))
+    ).
+
+%% Запрос `agg 7` заблокирован сообщением `6` в `a`; пришедшее в `a`
+%% меньшее `5` вытесняет `6` из фронтира и наследует его свидетельство.
+smaller_time_inherits_witness_test() ->
+    Items = [
+        relay(s),
+        relay(t),
+        relay(a),
+        ari_graph:node(agg, ari_notify_node, #{}),
+        ari_graph:in(e1, {agg, input}),
+        ari_graph:in(e2, {s, input}),
+        ari_graph:in(e3, {t, input}),
+        ari_graph:edge(s_to_a, {s, output}, {a, input}),
+        ari_graph:edge(t_to_a, {t, output}, {a, input}),
+        ari_graph:edge(a_to_agg, {a, output}, {agg, input}),
+        ari_graph:out(output, {agg, output})
+    ],
+    Inputs = [{e1, [{m7, {7, []}}]}, {e2, [{m6, {6, []}}]}, {e3, [{m5, {5, []}}]}],
+    Execution = start(Items, Inputs),
+    AfterTwo = steps(Execution, 2),
+    ?assertEqual(#{{message, a, {6, []}} => [{agg, {7, []}}]}, maps:get(blockers, inspect(AfterTwo))),
+    AfterThree = steps(AfterTwo, 1),
+    #{blockers := Blockers, messages := Messages} = inspect(AfterThree),
+    ?assertEqual(#{{message, a, {5, []}} => [{agg, {7, []}}]}, Blockers),
+    ?assertEqual([{5, []}], maps:get(a, Messages)),
+    {done, Done} = ari_local_runtime:advance(AfterThree, infinity),
+    ?assertEqual(
+        [{{batch, [m5]}, {5, []}}, {{batch, [m6]}, {6, []}}, {{batch, [m7]}, {7, []}}],
+        maps:get(output, ari_local_runtime:outputs(Done))
+    ).

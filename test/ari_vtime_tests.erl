@@ -149,3 +149,11 @@ valid_test() ->
     ?assertNot(ari_vtime:valid({5, [x]}, 1)),
     ?assertNot(ari_vtime:valid({5.0, []}, 0)),
     ?assertNot(ari_vtime:valid(5, 0)).
+
+%% Сортировка идёт от внешнего цикла к внутреннему, в отличие от порядка
+%% термов, сравнивающего список итераций с головы.
+sort_test() ->
+    Times = [{5, [0, 1]}, {6, [0, 0]}, {5, [3, 0]}, {5, [0, 0]}],
+    ?assertEqual([{5, [0, 0]}, {5, [3, 0]}, {5, [0, 1]}, {6, [0, 0]}], ari_vtime:sort(Times)),
+    ?assertNotEqual(ari_vtime:sort(Times), lists:sort(Times)),
+    ?assertEqual([{5, []}, {5, []}, {6, []}], ari_vtime:sort([{6, []}, {5, []}, {5, []}])).
