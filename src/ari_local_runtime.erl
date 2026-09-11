@@ -5,6 +5,9 @@
 %% маршрутизации, фиксирует стабильные порядки узлов и рёбер и считает
 %% минимальные сводки непустых путей между узлами.
 %%
+%% `new/2` создаёт прогон по программе: вызывает `init/1` каждого узла,
+%% наполняет входные очереди и ставит в `ready` начальные переходы.
+%%
 %% Собственных процессов модуль не создаёт; прогон идёт по месту вызова.
 %%
 %% Ошибки сборки возвращаются как `{error, Reason}`:
@@ -16,12 +19,31 @@
 %%   объявленный в `Module:input()`;
 %% - `{unknown_output_slot, Edge, Node, Slot}` — ребро выходит из слота, не
 %%   объявленного в `Module:output()`.
+%%
+%% Ошибки создания прогона:
+%%
+%% - `{unknown_input, Name}` — имени нет среди входных полурёбер;
+%% - `{duplicate_input, Name}` — имя названо во входе дважды;
+%% - `{invalid_input, Name, Item}` — элемент входа не является парой
+%%   сообщения и времени глубины узла-получателя;
+%% - `{init_crashed, Node, Exception}` — исключение или неверный результат
+%%   `init/1`;
+%% - `{invalid_notification, Node, Time}` — начальный запрос уведомления
+%%   с временем не той глубины, что контекст узла.
 -module(ari_local_runtime).
 
 -include("ariadne.hrl").
 
--export([compile/1, inspect/1]).
--export_type([compile_error/0, program/0]).
+-export([compile/1, inspect/1, new/2]).
+-export_type([
+    compile_error/0,
+    exception/0,
+    execution/0,
+    inputs/0,
+    new_error/0,
+    program/0,
+    violation/0
+]).
 
 -type kind() :: message | ingress | egress | feedback.
 -type endpoint() :: {name(), slot()} | undefined.
@@ -32,9 +54,30 @@
     | {unknown_input_slot, name(), name(), slot()}
     | {unknown_output_slot, name(), name(), slot()}.
 
+-type inputs() :: [{name(), [{term(), ari_vtime:t()}]}].
+
+-type exception() :: {error | exit | throw, term(), [term()]}.
+
+-type new_error() ::
+    {unknown_input, name()}
+    | {duplicate_input, name()}
+    | {invalid_input, name(), term()}
+    | {init_crashed, name(), exception()}
+    | {invalid_notification, name(), term()}.
+
+-type violation() ::
+    {time_rule, name(), message | notification, ari_vtime:t(), ari_vtime:t()}
+    | {crash, name(), message | notification, ari_vtime:t(), exception()}
+    | {invalid_result, name(), message | notification, ari_vtime:t(), exception()}.
+
+%% Готовый переход: ребро с сообщением или допустимое уведомление.
+-type item() :: {edge, name()} | {notify, name(), ari_vtime:t()}.
+
 -record(pnode, {
     module :: module(),
     args :: term(),
+    %% Глубина времени узла: число охватывающих циклов.
+    depth :: non_neg_integer(),
     %% Рёбра каждого объявленного выходного слота в порядке `edge_order`.
     outputs :: #{slot() => [name()]},
     %% Рёбра каждого объявленного входного слота в порядке `edge_order`.
@@ -61,6 +104,21 @@
 
 -opaque program() :: #program{}.
 
+-record(execution, {
+    program :: #program{},
+    states :: #{name() => term()},
+    queues :: #{name() => queue:queue({term(), ari_vtime:t()})},
+    counts :: ari_progress:counts(),
+    notify :: ari_progress:requests(),
+    ready :: queue:queue(item()),
+    %% Уведомления, уже поставленные в `ready`.
+    scheduled :: #{{name(), ari_vtime:t()} => true},
+    steps = 0 :: non_neg_integer(),
+    violations = [] :: [violation()]
+}).
+
+-opaque execution() :: #execution{}.
+
 -define(CALLBACKS, [
     {input, 0},
     {output, 0},
@@ -78,8 +136,31 @@ compile(#graph{nodes = Nodes, edges = Edges}) ->
         throw:{compile_error, Reason} -> {error, Reason}
     end.
 
-%% @doc Показывает содержимое программы в виде map.
--spec inspect(program()) -> map().
+%% @doc Создаёт прогон: вызывает `init/1` узлов в `node_order`, загружает
+%% вход, затем наполняет `ready` непустыми входными рёбрами в `edge_order`
+%% и допустимыми начальными уведомлениями.
+-spec new(program(), inputs()) -> {ok, execution()} | {error, new_error()}.
+new(#program{} = Program, Inputs) ->
+    try
+        {ok, initialize(Program, Inputs)}
+    catch
+        throw:{new_error, Reason} -> {error, Reason}
+    end.
+
+%% @doc Показывает содержимое программы или прогона в виде map.
+-spec inspect(program() | execution()) -> map().
+inspect(#execution{} = Execution) ->
+    #{
+        program => inspect(Execution#execution.program),
+        states => Execution#execution.states,
+        queues => maps:map(fun(_Name, Queue) -> queue:to_list(Queue) end, Execution#execution.queues),
+        counts => Execution#execution.counts,
+        notify => Execution#execution.notify,
+        ready => queue:to_list(Execution#execution.ready),
+        scheduled => Execution#execution.scheduled,
+        steps => Execution#execution.steps,
+        violations => Execution#execution.violations
+    };
 inspect(#program{} = Program) ->
     #{
         nodes => maps:map(fun(_Name, Node) -> inspect_node(Node) end, Program#program.nodes),
@@ -91,8 +172,8 @@ inspect(#program{} = Program) ->
         summaries => Program#program.summaries
     }.
 
-inspect_node(#pnode{module = Module, args = Args, outputs = Outputs, inputs = Inputs}) ->
-    #{module => Module, args => Args, outputs => Outputs, inputs => Inputs}.
+inspect_node(#pnode{module = Module, args = Args, depth = Depth, outputs = Outputs, inputs = Inputs}) ->
+    #{module => Module, args => Args, depth => Depth, outputs => Outputs, inputs => Inputs}.
 
 inspect_edge(#pedge{kind = Kind, loop = Loop, from = From, to = To}) ->
     #{kind => Kind, loop => Loop, from => From, to => To}.
@@ -187,10 +268,11 @@ node_slots(#node{name = Name, module = Module}) ->
 
 %% @doc Строит индексы маршрутизации узла. Объявленный слот без рёбер
 %% получает пустой список, чем отличается от неизвестного слота.
-pnode(#node{name = Name, module = Module, args = Args}, {Inputs, Outputs}, EdgeOrder, Edges) ->
+pnode(#node{name = Name, module = Module, args = Args, context = Context}, {Inputs, Outputs}, EdgeOrder, Edges) ->
     #pnode{
         module = Module,
         args = Args,
+        depth = length(Context),
         outputs = slot_edges(Name, Outputs, #pedge.from, EdgeOrder, Edges),
         inputs = slot_edges(Name, Inputs, #pedge.to, EdgeOrder, Edges)
     }.
@@ -242,3 +324,129 @@ edge_name(#feedback{name = Name}) -> Name.
 
 invalid(Reason) ->
     throw({compile_error, Reason}).
+
+%% Создание прогона.
+
+initialize(#program{node_order = NodeOrder} = Program, Inputs) ->
+    validate_inputs(Program, Inputs, []),
+    {States, Notify} = lists:foldl(
+        fun(Name, {States, Notify}) ->
+            {State, Requests} = init_node(Name, maps:get(Name, Program#program.nodes)),
+            {States#{Name => State}, put_requests(Name, Requests, Notify)}
+        end,
+        {#{}, #{}},
+        NodeOrder
+    ),
+    {Queues, Counts} = load_inputs(Program, Inputs),
+    Ready = queue:from_list([
+        {edge, Name}
+     || Name <- Program#program.inputs, not queue:is_empty(maps:get(Name, Queues))
+    ]),
+    schedule(#execution{
+        program = Program,
+        states = States,
+        queues = Queues,
+        counts = Counts,
+        notify = Notify,
+        ready = Ready,
+        scheduled = #{}
+    }).
+
+validate_inputs(_Program, [], _Seen) ->
+    ok;
+validate_inputs(#program{inputs = Inputs} = Program, [{Name, Messages} | Rest], Seen) ->
+    lists:member(Name, Inputs) orelse rejected({unknown_input, Name}),
+    lists:member(Name, Seen) andalso rejected({duplicate_input, Name}),
+    Depth = target_depth(Program, Name),
+    lists:foreach(
+        fun({_Message, Time} = Item) ->
+            ari_vtime:valid(Time, Depth) orelse rejected({invalid_input, Name, Item})
+        end,
+        Messages
+    ),
+    validate_inputs(Program, Rest, [Name | Seen]).
+
+target_depth(#program{edges = Edges, nodes = Nodes}, EdgeName) ->
+    #pedge{to = {Node, _Slot}} = maps:get(EdgeName, Edges),
+    (maps:get(Node, Nodes))#pnode.depth.
+
+%% @doc Вызывает `init/1` узла. Исключение и результат не той формы дают
+%% `init_crashed`, запрос времени чужой глубины — `invalid_notification`.
+init_node(Name, #pnode{module = Module, args = Args, depth = Depth}) ->
+    {State, Requests} =
+        try
+            case Module:init(Args) of
+                {_State, _Requests} = Result when is_list(_Requests) -> Result;
+                Other -> erlang:error({badmatch, Other})
+            end
+        catch
+            Class:Reason:Stack ->
+                rejected({init_crashed, Name, {Class, Reason, Stack}})
+        end,
+    lists:foreach(
+        fun(Time) ->
+            ari_vtime:valid(Time, Depth) orelse rejected({invalid_notification, Name, Time})
+        end,
+        Requests
+    ),
+    {State, Requests}.
+
+%% @doc Добавляет запросы узла в `notify`; узлы без запросов ключа не имеют.
+put_requests(_Name, [], Notify) ->
+    Notify;
+put_requests(Name, Requests, Notify) ->
+    Known = maps:get(Name, Notify, ordsets:new()),
+    maps:put(Name, ordsets:union(ordsets:from_list(Requests), Known), Notify).
+
+%% @doc Заводит очередь на каждое ребро и кладёт вход во входные очереди,
+%% считая сообщения по pointstamp'ам узла-получателя.
+load_inputs(#program{edge_order = EdgeOrder, edges = Edges}, Inputs) ->
+    Empty = maps:from_list([{Name, queue:new()} || Name <- EdgeOrder]),
+    lists:foldl(
+        fun({Name, Messages}, {Queues, Counts}) ->
+            #pedge{to = {Node, _Slot}} = maps:get(Name, Edges),
+            NewCounts = lists:foldl(
+                fun({_Message, Time}, Acc) -> increment({Node, Time}, Acc) end,
+                Counts,
+                Messages
+            ),
+            {maps:put(Name, queue:from_list(Messages), Queues), NewCounts}
+        end,
+        {Empty, #{}},
+        Inputs
+    ).
+
+increment(Key, Counts) ->
+    maps:update_with(Key, fun(Count) -> Count + 1 end, 1, Counts).
+
+%% @doc Ставит в хвост `ready` допустимые запросы, ещё не поставленные:
+%% узлы в `node_order`, времена внутри узла в порядке термов.
+schedule(#execution{program = Program, notify = Notify} = Execution) ->
+    #program{node_order = NodeOrder, summaries = Summaries} = Program,
+    lists:foldl(
+        fun(Name, Acc) ->
+            lists:foldl(
+                fun(Time, #execution{scheduled = Scheduled, ready = Ready} = Inner) ->
+                    case
+                        not maps:is_key({Name, Time}, Scheduled) andalso
+                            ari_progress:admissible(Name, Time, Inner#execution.counts, Notify, Summaries)
+                    of
+                        true ->
+                            Inner#execution{
+                                ready = queue:in({notify, Name, Time}, Ready),
+                                scheduled = Scheduled#{{Name, Time} => true}
+                            };
+                        false ->
+                            Inner
+                    end
+                end,
+                Acc,
+                maps:get(Name, Notify, [])
+            )
+        end,
+        Execution,
+        NodeOrder
+    ).
+
+rejected(Reason) ->
+    throw({new_error, Reason}).

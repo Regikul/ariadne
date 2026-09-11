@@ -72,10 +72,15 @@ runtime.
 -record(pnode, {
     module  :: module(),
     args    :: term(),
+    depth   :: non_neg_integer(),      % глубина времени узла
     outputs :: #{slot() => [name()]},  % куда уходит выход слота
     inputs  :: #{slot() => [name()]}   % откуда приходит вход слота
 }).
 ```
+
+`#pnode.depth` равна числу охватывающих циклов из `#node.context`, который
+`ari_graph` заполняет при раскрытии циклов. По рёбрам глубину не восстановить:
+цикл без полурёбер допустим.
 
 `#pnode.outputs` и `#pnode.inputs` содержат ключ для каждого объявленного
 слота. Слот без рёбер хранится с пустым списком: выход в такой слот никуда не
@@ -122,9 +127,16 @@ runtime.
 только на входных полурёбрах.
 
 Начальные запросы уведомлений правилу времени узла не подчиняются: входного
-времени при инициализации нет, сравнивать не с чем. Проверка и не нужна.
-`Clock` определён через `NotRequests(p)` наравне с сообщениями в очередях,
-поэтому возможные последствия начальных запросов учтены с первого шага.
+времени при инициализации нет, сравнивать не с чем. `Clock` определён через
+`NotRequests(p)` наравне с сообщениями в очередях, поэтому возможные
+последствия начальных запросов учтены с первого шага.
+
+Проверяется только форма времени: `ari_vtime:valid(Time, Depth)` требует
+целую эпоху и ровно `Depth` неотрицательных координат, где `Depth` —
+глубина контекста узла из `#pnode.depth`. Запрос чужой глубины уронил бы
+`ari_vtime:le/2` внутри планировщика при первой проверке допустимости, а
+ошибка узла не должна выглядеть ошибкой планировщика. Той же проверке
+подлежат времена входных сообщений относительно узла-получателя.
 
 ## Состояние
 
@@ -620,10 +632,7 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 
 ```erlang
 -spec compile(#graph{}) -> {ok, program()} | {error, compile_error()}.
--spec new(program(), inputs()) ->
-    {ok, execution()}
-    | {error, {unknown_input, name()} | {duplicate_input, name()}
-            | {init_crashed, name(), exception()}}.
+-spec new(program(), inputs()) -> {ok, execution()} | {error, new_error()}.
 -spec advance(execution(), pos_integer() | infinity) ->
     {done | more, execution()}.
 
@@ -640,6 +649,12 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
   | {missing_callback, name(), module(), {atom(), arity()}}
   | {unknown_input_slot, name(), name(), slot()}
   | {unknown_output_slot, name(), name(), slot()}.
+-type new_error() ::
+    {unknown_input, name()}
+  | {duplicate_input, name()}
+  | {invalid_input, name(), term()}
+  | {init_crashed, name(), exception()}
+  | {invalid_notification, name(), term()}.
 
 -type inputs()  :: [{name(), [{term(), ari_vtime:t()}]}].
 -type outputs() :: #{name() => [{term(), ari_vtime:t()}]}.
@@ -663,7 +678,11 @@ feedback-ребро и имеет сводку `{0, 1, []}`.
 `new/2` вызывает `init/1` каждого узла, наполняет входные очереди и ловит ошибки
 адресации до первого шага. `{unknown_input, Name}` означает имя, которого нет
 среди входных полурёбер, `{duplicate_input, Name}` — имя, названное в списке
-дважды, `{init_crashed, Name, Exception}` — исключение при инициализации узла.
+дважды, `{invalid_input, Name, Item}` — элемент входа, не являющийся парой
+сообщения и времени глубины узла-получателя, `{init_crashed, Name, Exception}`
+— исключение при инициализации узла; результат `init/1` не той формы
+считается тем же исключением с `badmatch`. `{invalid_notification, Name,
+Time}` — начальный запрос с временем не той глубины, что контекст узла.
 Ошибочного возврата у `advance/2` нет: нарушения временного правила,
 исключения callbacks и ошибки применения их результатов попадают в
 `violations/1`.

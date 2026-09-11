@@ -13,6 +13,9 @@
 %% исключая собственные feedback-рёбра. Проверяется и плоский граф. Несовмещённые
 %% полурёбра цикла являются ошибкой.
 %%
+%% Каждый узел получает `#node.context` — список охватывающих циклов,
+%% внутренний первым. Глубина времени узла равна длине этого списка.
+%%
 %% Модули узлов и соответствие слотов callbacks здесь не проверяются:
 %% это ответственность сборки runtime.
 %%
@@ -59,29 +62,33 @@ loop(Name, Items) when is_list(Items) ->
 %% @doc Собирает, раскрывает и проверяет описание графа.
 -spec graph(list()) -> #graph{}.
 graph(Items) when is_list(Items) ->
-    {Nodes, Edges, Loops} = build(Items, graph),
+    {Nodes, Edges, Loops} = build(Items, []),
     validate_graph(Nodes, Edges, Loops),
     #graph{nodes = Nodes, edges = Edges}.
 
 %% @doc Собирает один контекст и возвращает его плоские узлы, рёбра и циклы.
+%% `Context` — список охватывающих циклов, внутренний первым.
 build(Items, Context) ->
-    {Nodes, Rest} = lists:partition(fun(Item) -> is_record(Item, node) end, Items),
+    {RawNodes, Rest} = lists:partition(fun(Item) -> is_record(Item, node) end, Items),
+    Nodes = [Node#node{context = Context} || Node <- RawNodes],
     {Loops, RawEdges} = lists:partition(fun(Item) -> is_record(Item, loop) end, Rest),
     NodeNames = [Node#node.name || Node <- Nodes],
     Edges = [prepare_edge(Edge, NodeNames, Context) || Edge <- RawEdges],
-    {LoopNodes, LoopEdges, LoopNames, RemainingEdges, LoopOwners} = build_loops(Loops, Edges),
+    {LoopNodes, LoopEdges, LoopNames, RemainingEdges, LoopOwners} =
+        build_loops(Loops, Edges, Context),
     AllEdges = RemainingEdges ++ LoopEdges,
     Owners = maps:merge(LoopOwners, maps:from_list([{Name, {node, Name}} || Name <- NodeNames])),
     ensure_context_acyclic(Context, Owners, AllEdges),
     {Nodes ++ LoopNodes, AllEdges, LoopNames}.
 
 %% @doc Раскрывает циклы и соединяет их полурёбра с текущим контекстом.
-build_loops([], Edges) ->
+build_loops([], Edges, _Context) ->
     {[], [], [], Edges, #{}};
-build_loops([#loop{name = Name, items = Items} | Rest], Edges) ->
-    {Nodes, InnerEdges, InnerLoops} = build(Items, {loop, Name}),
+build_loops([#loop{name = Name, items = Items} | Rest], Edges, Context) ->
+    {Nodes, InnerEdges, InnerLoops} = build(Items, [Name | Context]),
     {ResolvedEdges, RemainingEdges} = resolve_boundaries(Name, InnerEdges, Edges),
-    {RestNodes, RestEdges, RestLoops, FinalEdges, RestOwners} = build_loops(Rest, RemainingEdges),
+    {RestNodes, RestEdges, RestLoops, FinalEdges, RestOwners} =
+        build_loops(Rest, RemainingEdges, Context),
     {
         Nodes ++ RestNodes,
         ResolvedEdges ++ RestEdges,
@@ -114,14 +121,14 @@ ensure_context_acyclic(Context, Owners, Edges) ->
     ),
     case acyclic(Names, Arcs) of
         true -> ok;
-        false -> invalid({cycle_without_feedback, Context})
+        false -> invalid({cycle_without_feedback, context_label(Context)})
     end.
 
 prepare_edge(Edge, Nodes, Context) ->
     validate_edge(Edge, Nodes, Context),
     bind_feedback(Edge, Context).
 
-bind_feedback(Edge = #feedback{}, {loop, Loop}) ->
+bind_feedback(Edge = #feedback{}, [Loop | _]) ->
     Edge#feedback{loop = Loop};
 bind_feedback(Edge, _Context) ->
     Edge.
@@ -182,23 +189,27 @@ validate_edge(#edge{name = Name, from = {_, _} = From, to = {_, _} = To}, Nodes,
     validate_endpoint(Name, To, input, Nodes);
 validate_edge(#edge{name = Name, from = From, to = To}, _Nodes, _Context) ->
     invalid({invalid_endpoints, Name, From, To});
-validate_edge(#feedback{name = Name}, _Nodes, graph) ->
+validate_edge(#feedback{name = Name}, _Nodes, []) ->
     invalid({feedback_outside_loop, Name});
 validate_edge(
     #feedback{name = Name, from = {Node, _}, to = {Node, _}},
     _Nodes,
-    {loop, _}
+    [_ | _]
 ) ->
     invalid({self_edge, Name, Node});
 validate_edge(
     #feedback{name = Name, from = {_, _} = From, to = {_, _} = To},
     Nodes,
-    {loop, _}
+    [_ | _]
 ) ->
     validate_endpoint(Name, From, output, Nodes),
     validate_endpoint(Name, To, input, Nodes);
-validate_edge(#feedback{name = Name, from = From, to = To}, _Nodes, {loop, _}) ->
+validate_edge(#feedback{name = Name, from = From, to = To}, _Nodes, [_ | _]) ->
     invalid({invalid_endpoints, Name, From, To}).
+
+%% @doc Называет контекст в диагностике: плоский граф или ближайший цикл.
+context_label([]) -> graph;
+context_label([Loop | _]) -> {loop, Loop}.
 
 validate_endpoint(Edge, {Node, _Slot}, _Direction, Nodes) ->
     case lists:member(Node, Nodes) of

@@ -139,3 +139,13 @@ dominates_test() ->
     ?assert(ari_vtime:dominates(Summary({1, 1, [0]}), Summary({1, 1, [0]}))),
     ?assertNot(ari_vtime:dominates(Summary({0, 0, []}), Summary({1, 0, []}))),
     ?assertNot(ari_vtime:dominates(Summary({0, 0, []}), Summary({0, 0, [0]}))).
+
+valid_test() ->
+    ?assert(ari_vtime:valid(ari_vtime:new(5), 0)),
+    ?assert(ari_vtime:valid(ari_vtime:ingress(ari_vtime:new(5)), 1)),
+    ?assertNot(ari_vtime:valid(ari_vtime:new(5), 1)),
+    ?assertNot(ari_vtime:valid(ari_vtime:ingress(ari_vtime:new(5)), 0)),
+    ?assertNot(ari_vtime:valid({5, [-1]}, 1)),
+    ?assertNot(ari_vtime:valid({5, [x]}, 1)),
+    ?assertNot(ari_vtime:valid({5.0, []}, 0)),
+    ?assertNot(ari_vtime:valid(5, 0)).

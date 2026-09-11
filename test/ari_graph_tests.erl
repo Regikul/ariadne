@@ -95,7 +95,7 @@ loop_test() ->
     ]),
     ?assertEqual(
         #graph{
-            nodes = OuterNodes ++ InnerNodes,
+            nodes = OuterNodes ++ [Node#node{context = [iteration]} || Node <- InnerNodes],
             edges = [
                 #ingress{
                     name = input,
@@ -215,6 +215,10 @@ nested_loop_with_outer_feedback_test() ->
     ?assertEqual(
         [{inner_next, inner}, {outer_next, outer}],
         lists:sort([{Name, Loop} || #feedback{name = Name, loop = Loop} <- Graph#graph.edges])
+    ),
+    ?assertEqual(
+        [{a, [inner, outer]}, {b, [inner, outer]}, {entry, [outer]}, {exit, [outer]}],
+        lists:sort([{Name, Context} || #node{name = Name, context = Context} <- Graph#graph.nodes])
     ).
 
 multiple_loop_ports_and_feedbacks_test() ->

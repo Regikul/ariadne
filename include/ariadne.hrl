@@ -7,7 +7,9 @@
 -record(node, {
     name,
     module,
-    args
+    args,
+    %% Охватывающие циклы, внутренний первым; заполняется при сборке графа.
+    context = []
 }).
 
 -record(edge, {

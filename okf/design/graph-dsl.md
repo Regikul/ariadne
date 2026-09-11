@@ -16,7 +16,7 @@ sources:
 DSL задаёт узлы, внутренние рёбра и входные/выходные полурёбра графа.
 
 ```erlang
-#node{name, module, args}
+#node{name, module, args, context}
 #edge{name, from, to}
 #ingress{name, loop, from, to}
 #egress{name, loop, from, to}
@@ -24,6 +24,10 @@ DSL задаёт узлы, внутренние рёбра и входные/в�
 #loop{name, items}
 #graph{nodes, edges}
 ```
+
+`#node.context` — список охватывающих циклов, внутренний первым; `graph/1`
+заполняет его при раскрытии циклов, у узла плоского графа он пуст. Длина
+списка равна глубине времени узла.
 
 У входного полуребра `from = undefined`, у выходного `to = undefined`.
 `#loop.items` хранит сырой список узлов и рёбер. `graph/1` раскрывает циклы и

@@ -11,7 +11,7 @@
 %% `dominates/2` сравнивает сводки одной формы.
 -module(ari_vtime).
 
--export([egress/1, feedback/1, ingress/1, le/2, new/1]).
+-export([egress/1, feedback/1, ingress/1, le/2, new/1, valid/2]).
 -export([compose/2, dominates/2, summary/1, summary/3, transfer/2]).
 -export_type([kind/0, summary/0, t/0]).
 
@@ -49,6 +49,15 @@ egress({Time, [_Iteration | OuterIterations]}) ->
 -spec feedback(t()) -> t().
 feedback({Time, [Iteration | OuterIterations]}) ->
     {Time, [Iteration + 1 | OuterIterations]}.
+
+%% @doc Проверяет, что терм является временем указанной глубины: целая
+%% эпоха и ровно `Depth` неотрицательных целых координат.
+-spec valid(term(), non_neg_integer()) -> boolean().
+valid({Time, Iterations}, Depth) when is_integer(Time), is_list(Iterations) ->
+    length(Iterations) =:= Depth andalso
+        lists:all(fun(Iteration) -> is_integer(Iteration) andalso Iteration >= 0 end, Iterations);
+valid(_Term, _Depth) ->
+    false.
 
 %% @doc Сравнивает эпохи и, независимо, векторы итераций одной глубины.
 %% Итерации сравниваются лексикографически от внешнего цикла к внутреннему.
