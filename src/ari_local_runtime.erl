@@ -21,9 +21,8 @@
 -include("ariadne.hrl").
 
 -export([compile/1, inspect/1]).
--export_type([compile_error/0, name/0, program/0]).
+-export_type([compile_error/0, program/0]).
 
--type name() :: term().
 -type kind() :: message | ingress | egress | feedback.
 -type endpoint() :: {name(), slot()} | undefined.
 

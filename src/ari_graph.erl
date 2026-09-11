@@ -24,35 +24,35 @@
 
 -export([edge/3, feedback/3, graph/1, in/2, loop/2, node/3, out/2]).
 
--type endpoint() :: {term(), slot()}.
+-type endpoint() :: {name(), slot()}.
 
 %% @doc Создаёт описание узла.
--spec node(term(), module(), term()) -> #node{}.
+-spec node(name(), module(), term()) -> #node{}.
 node(Name, Module, Args) ->
     #node{name = Name, module = Module, args = Args}.
 
 %% @doc Создаёт входное полуребро графа или цикла.
--spec in(term(), endpoint()) -> #edge{}.
+-spec in(name(), endpoint()) -> #edge{}.
 in(Name, To) ->
     #edge{name = Name, to = To}.
 
 %% @doc Создаёт обычное внутреннее ребро.
--spec edge(term(), endpoint(), endpoint()) -> #edge{}.
+-spec edge(name(), endpoint(), endpoint()) -> #edge{}.
 edge(Name, From, To) ->
     #edge{name = Name, from = From, to = To}.
 
 %% @doc Создаёт выходное полуребро графа или цикла.
--spec out(term(), endpoint()) -> #edge{}.
+-spec out(name(), endpoint()) -> #edge{}.
 out(Name, From) ->
     #edge{name = Name, from = From}.
 
 %% @doc Создаёт ребро перехода к следующей итерации цикла.
--spec feedback(term(), endpoint(), endpoint()) -> #feedback{}.
+-spec feedback(name(), endpoint(), endpoint()) -> #feedback{}.
 feedback(Name, From, To) ->
     #feedback{name = Name, from = From, to = To}.
 
 %% @doc Группирует сырой список элементов во временной контекст цикла.
--spec loop(term(), list()) -> #loop{}.
+-spec loop(name(), list()) -> #loop{}.
 loop(Name, Items) when is_list(Items) ->
     #loop{name = Name, items = Items}.
 

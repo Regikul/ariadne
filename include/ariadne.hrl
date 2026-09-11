@@ -1,6 +1,7 @@
 -ifndef(ARIADNE_HRL).
 -define(ARIADNE_HRL, true).
 
+-type name() :: atom().
 -type slot() :: atom().
 
 -record(node, {
