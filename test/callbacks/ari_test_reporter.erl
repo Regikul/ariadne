@@ -1,6 +1,8 @@
 %% A vertex passing every message from `in' to `out' and reporting its
 %% termination: the arguments are the name to report and the process
-%% to report it to.
+%% to report it to. A third argument makes the vertex faulty: `init'
+%% fails the initialisation, `terminate' fails the termination once
+%% it has been reported.
 -module(ari_test_reporter).
 
 -behaviour(ariadne_vertex).
@@ -11,7 +13,9 @@ inputs() -> [in].
 
 outputs() -> [out].
 
-init({Name, Pid}) -> {Name, Pid}.
+init({Name, Pid}) -> {Name, Pid, none};
+init({Name, _Pid, init}) -> error({init_failed, Name});
+init({Name, Pid, Fault}) -> {Name, Pid, Fault}.
 
 handle_message(in, Message, Time, State) ->
     {State, [], [{out, Message, Time}]}.
@@ -19,6 +23,9 @@ handle_message(in, Message, Time, State) ->
 handle_notification(_Time, State) ->
     {State, []}.
 
-terminate({Name, Pid}) ->
+terminate({Name, Pid, Fault}) ->
     Pid ! {terminated, Name},
-    ok.
+    case Fault of
+        terminate -> error({terminate_failed, Name});
+        none -> ok
+    end.

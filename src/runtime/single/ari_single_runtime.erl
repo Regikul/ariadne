@@ -96,6 +96,11 @@
 %% graph (see {@link ari_plan:prepare/1}, whose errors the call fails
 %% with), initialises every vertex (see {@link
 %% ariadne_vertex:init/1}) and opens every input at epoch 0.
+%%
+%% If the `init/1' of a vertex fails, the vertices initialised before
+%% it are terminated (see {@link ariadne_vertex:terminate/1}) and the
+%% call fails with the exception of `init/1'; an exception of
+%% `terminate/1' raised meanwhile is dropped.
 %% @end
 %%--------------------------------------------------------------------
 -spec new(Graph :: #graph{}) -> t().
@@ -103,7 +108,7 @@ new(Graph) ->
     Plan = ari_plan:prepare(Graph),
     #runtime{
         plan = Plan,
-        states = #{Vertex => init(Plan, Vertex) || Vertex <- ari_plan:vertices(Plan)},
+        states = init(Plan, ari_plan:vertices(Plan), #{}),
         queue = queue:new(),
         pending = #{},
         inputs = #{Input => 0 || Input <- ari_plan:inputs(Plan)},
@@ -229,18 +234,29 @@ pull(Output, #runtime{outputs = Outputs} = Runtime) ->
 %% @doc
 %% Shuts the runtime down: terminates every vertex, see {@link
 %% ariadne_vertex:terminate/1}. Whatever was outstanding is dropped.
+%%
+%% Every vertex is terminated even if the `terminate/1' of another
+%% one fails; the call then fails with the first such exception once
+%% every vertex has been tried.
 %% @end
 %%--------------------------------------------------------------------
 -spec stop(t()) -> ok.
 stop(#runtime{plan = Plan, states = States}) ->
-    maps:foreach(
-        fun(Vertex, State) ->
-            {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
-            _ = Callback:terminate(State),
-            ok
+    Outcome = maps:fold(
+        fun(Vertex, State, Acc) ->
+            case terminate(Plan, Vertex, State) of
+                ok -> Acc;
+                Failure when Acc =:= ok -> Failure;
+                _Failure -> Acc
+            end
         end,
+        ok,
         States
-    ).
+    ),
+    case Outcome of
+        ok -> ok;
+        {Class, Reason, Stacktrace} -> erlang:raise(Class, Reason, Stacktrace)
+    end.
 
 %%%===================================================================
 %%% Internal functions
@@ -248,15 +264,45 @@ stop(#runtime{plan = Plan, states = States}) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The initial state of the vertex `Vertex'.
+%% Initialises the vertices `Vertices' one after another, given the
+%% states `States' of the vertices initialised so far. If an `init/1'
+%% fails, the vertices initialised so far are terminated and the
+%% exception is raised again.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec init(ari_plan:t(), Vertex :: atom()) -> term().
-init(Plan, Vertex) ->
+-spec init(ari_plan:t(), Vertices :: [atom()], States :: #{atom() => term()}) ->
+    #{atom() => term()}.
+init(_Plan, [], States) ->
+    States;
+init(Plan, [Vertex | Rest], States) ->
     {Callback, Args} = ari_plan:vertex(Plan, Vertex),
-    Callback:init(Args).
+    try Callback:init(Args) of
+        State -> init(Plan, Rest, States#{Vertex => State})
+    catch
+        Class:Reason:Stacktrace ->
+            maps:foreach(fun(V, S) -> _ = terminate(Plan, V, S), ok end, States),
+            erlang:raise(Class, Reason, Stacktrace)
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Terminates the vertex `Vertex' of state `State', catching whatever
+%% its `terminate/1' raises.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec terminate(ari_plan:t(), Vertex :: atom(), State :: term()) ->
+    ok | {error | exit | throw, Reason :: term(), Stacktrace :: erlang:stacktrace()}.
+terminate(Plan, Vertex, State) ->
+    {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
+    try Callback:terminate(State) of
+        _ -> ok
+    catch
+        Class:Reason:Stacktrace -> {Class, Reason, Stacktrace}
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

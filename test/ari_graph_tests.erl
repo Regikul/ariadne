@@ -197,6 +197,27 @@ an_edge_between_neighbouring_scopes_is_left_alone_test() ->
     ]),
     ?assertMatch(#edge{from = {left, out}, to = {right, in}}, edge(sideways, Graph)).
 
+%% Two scopes of one name could not be told apart by the name a vertex
+%% carries, so the description is refused.
+two_scopes_of_one_name_are_refused_test() ->
+    ?assertError({duplicate_scope, spin}, ari_graph:graph([
+        ari_graph:loop(spin, [
+            ari_graph:node(left, left_callback, [])
+        ]),
+        ari_graph:loop(spin, [
+            ari_graph:node(right, right_callback, [])
+        ])
+    ])).
+
+a_scope_nested_in_a_scope_of_one_name_is_refused_test() ->
+    ?assertError({duplicate_scope, spin}, ari_graph:graph([
+        ari_graph:loop(spin, [
+            ari_graph:loop(spin, [
+                ari_graph:node(inner, inner_callback, [])
+            ])
+        ])
+    ])).
+
 %%%===================================================================
 %%% Helpers
 %%%===================================================================

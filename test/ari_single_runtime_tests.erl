@@ -281,6 +281,32 @@ stop_terminates_every_vertex_test() ->
     ?assertEqual(ok, ari_single_runtime:stop(R)),
     ?assertEqual([first, second], lists:sort(terminated([]))).
 
+stop_terminates_every_vertex_when_one_fails_test() ->
+    Self = self(),
+    R = ari_single_runtime:new(ari_graph:graph([
+        ari_graph:in(input, {first, in}),
+        ari_graph:node(first, ari_test_reporter, {first, Self, terminate}),
+        ari_graph:edge(between, {first, out}, {second, in}),
+        ari_graph:node(second, ari_test_reporter, {second, Self}),
+        ari_graph:out(output, {second, out})
+    ])),
+    ?assertError({terminate_failed, first}, ari_single_runtime:stop(R)),
+    ?assertEqual([first, second], lists:sort(terminated([]))).
+
+new_terminates_initialised_vertices_when_init_fails_test() ->
+    Self = self(),
+    Graph = ari_graph:graph([
+        ari_graph:in(input, {first, in}),
+        ari_graph:node(first, ari_test_reporter, {first, Self}),
+        ari_graph:edge(between, {first, out}, {second, in}),
+        ari_graph:node(second, ari_test_reporter, {second, Self, init}),
+        ari_graph:edge(onward, {second, out}, {third, in}),
+        ari_graph:node(third, ari_test_reporter, {third, Self}),
+        ari_graph:out(output, {third, out})
+    ]),
+    ?assertError({init_failed, second}, ari_single_runtime:new(Graph)),
+    ?assertEqual([first], terminated([])).
+
 %%%===================================================================
 %%% Helpers
 %%%===================================================================

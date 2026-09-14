@@ -79,10 +79,19 @@
 %%
 %% Items referring to names of vertices the description does not
 %% define are left as they are.
+%%
+%% Fails with `{duplicate_scope, Name}' if two scopes of the
+%% description share a name: a vertex is marked with the name of its
+%% scope alone, so two scopes of one name would be taken for one.
 %% @end
 %%--------------------------------------------------------------------
 -spec graph(Items :: [item()]) -> graph().
 graph(Items) ->
+    Scopes = scopes(Items),
+    case Scopes -- lists:usort(Scopes) of
+        [] -> ok;
+        [Duplicate | _] -> error({duplicate_scope, Duplicate})
+    end,
     Paths = paths(Items, []),
     {Nodes, Edges} = unfold(Items, [], [], []),
     #graph{
@@ -180,6 +189,23 @@ loop(Name, Items) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Collects the names of the scopes of `Items', nested ones included.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec scopes(Items :: [item()]) -> [name()].
+scopes(Items) ->
+    lists:flatmap(
+        fun
+            (#scope{name = Name, items = Nested}) -> [Name | scopes(Nested)];
+            (_Item) -> []
+        end,
+        Items
+    ).
 
 %%--------------------------------------------------------------------
 %% @doc

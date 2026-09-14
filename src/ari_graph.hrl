@@ -20,19 +20,21 @@
     to  = undefined :: endpoint() | undefined
 }).
 
-%% A channel leading into the scope `scope'.
+%% A channel leading into the scope `scope'. A start left `undefined'
+%% is the outside world.
 -record(ingress, {
     name :: atom(),
-    from :: endpoint(),
+    from :: endpoint() | undefined,
     to   :: endpoint(),
     scope :: atom()
 }).
 
-%% A channel leading out of the scope `scope'.
+%% A channel leading out of the scope `scope'. An end left `undefined'
+%% is the outside world.
 -record(egress, {
     name :: atom(),
     from :: endpoint(),
-    to   :: endpoint(),
+    to   :: endpoint() | undefined,
     scope :: atom()
 }).
 
