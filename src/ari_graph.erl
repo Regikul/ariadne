@@ -4,8 +4,9 @@
 %%%
 %%% A graph is described by a list of items. A vertex is an operator:
 %%% a name, the callback module running it and the arguments it starts
-%%% with. An edge is a channel between two vertices, carrying a name
-%%% of its own, unique over the whole graph. A loop scope, built by
+%%% with. An edge is a channel between two slots of two vertices (see
+%%% {@link ariadne_vertex}), carrying a name of its own, unique over
+%%% the whole graph. A loop scope, built by
 %%% {@link loop/2}, holds a list of items of its own and stands in the
 %%% list of the enclosing graph as a single item, so that scopes nest.
 %%%
@@ -30,20 +31,20 @@
 %%%
 %%% ```
 %%% ari_graph:graph([
-%%%     ari_graph:in(input, filter),
+%%%     ari_graph:in(input, {filter, in}),
 %%%     ari_graph:node(filter, filter_callback, []),
 %%%     ari_graph:loop(processing, [
-%%% 
+%%%
 %%%         ari_graph:node(prepare, prepare_callback, #{foo => bar}),
 %%%         ari_graph:node(is_done, is_done_callback, []),
 %%%
-%%%         ari_graph:edge(into_processing, filter, prepare),
-%%%         ari_graph:edge(into_done, prepare, is_done),
-%%%         ari_graph:feedback(again, is_done, prepare)
+%%%         ari_graph:edge(into_processing, {filter, out}, {prepare, in}),
+%%%         ari_graph:edge(into_done, {prepare, out}, {is_done, in}),
+%%%         ari_graph:feedback(again, {is_done, continue}, {prepare, in})
 %%%     ]),
-%%%     ari_graph:edge(ready, is_done, finalize),
+%%%     ari_graph:edge(ready, {is_done, done}, {finalize, in}),
 %%%     ari_graph:node(finalize, finalize_callback, []),
-%%%     ari_graph:out(done, finalize)
+%%%     ari_graph:out(done, {finalize, out})
 %%% ])'''
 %%%
 %%% @end
@@ -59,12 +60,20 @@
     loop/2
 ]).
 
+-export_type([
+    edge_end/0
+]).
+
 -type name()   :: atom().
+-type slot()   :: atom().
 -type vertex() :: #vertex{}.
 -type edge()   :: #edge{} | #ingress{} | #egress{} | #feedback{}.
 -type scope()  :: #scope{}.
 -type item()   :: vertex() | edge() | scope().
 -type graph()  :: #graph{}.
+
+%% An end of an edge: a slot of a vertex.
+-type edge_end() :: {name(), slot()}.
 
 %% The names of the scopes a vertex sits in, the innermost one first.
 %% A vertex outside of every loop has an empty path.
@@ -93,10 +102,10 @@ graph(Items) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Builds an edge bringing the items of the outside world into the
-%% vertex `To'.
+%% slot `To' of a vertex.
 %% @end
 %%--------------------------------------------------------------------
--spec in(Name :: name(), To :: name()) -> edge().
+-spec in(Name :: name(), To :: edge_end()) -> edge().
 in(Name, To) ->
     #edge{
         name = Name,
@@ -105,11 +114,11 @@ in(Name, To) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Builds an edge carrying the items of the vertex `From' out of the
-%% graph.
+%% Builds an edge carrying the items of the slot `From' of a vertex
+%% out of the graph.
 %% @end
 %%--------------------------------------------------------------------
--spec out(Name :: name(), From :: name()) -> edge().
+-spec out(Name :: name(), From :: edge_end()) -> edge().
 out(Name, From) ->
     #edge{
         name = Name,
@@ -118,12 +127,13 @@ out(Name, From) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Builds an edge from the vertex `From' to the vertex `To'. Whether
-%% it stays a plain edge or becomes a boundary of a scope is decided
-%% by {@link graph/1} from the scopes its ends sit in.
+%% Builds an edge from the slot `From' of one vertex to the slot `To'
+%% of another. Whether it stays a plain edge or becomes a boundary of
+%% a scope is decided by {@link graph/1} from the scopes its ends sit
+%% in.
 %% @end
 %%--------------------------------------------------------------------
--spec edge(Name :: name(), From :: name(), To :: name()) -> edge().
+-spec edge(Name :: name(), From :: edge_end(), To :: edge_end()) -> edge().
 edge(Name, From, To) ->
     #edge{
         name = Name,
@@ -133,13 +143,14 @@ edge(Name, From, To) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Builds the back edge of a loop: the edge from the vertex `From' to
-%% the vertex `To' that sends an item to the next iteration. Both ends
-%% are expected to sit in one and the same scope, and the name of that
-%% scope is filled in by {@link graph/1}.
+%% Builds the back edge of a loop: the edge from the slot `From' of
+%% one vertex to the slot `To' of another that sends an item to the
+%% next iteration. Both vertices are expected to sit in one and the
+%% same scope, and the name of that scope is filled in by {@link
+%% graph/1}.
 %% @end
 %%--------------------------------------------------------------------
--spec feedback(Name :: name(), From :: name(), To :: name()) -> edge().
+-spec feedback(Name :: name(), From :: edge_end(), To :: edge_end()) -> edge().
 feedback(Name, From, To) ->
     #feedback{
         name = Name,
@@ -260,16 +271,18 @@ boundary(Edge, _Paths) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The path of the vertex `Name'. A name no vertex of the description
-%% carries is taken for a name of the outside world, which sits
-%% outside of every scope.
+%% The path of the vertex an end of an edge belongs to. An end that
+%% is `undefined' or names a vertex the description does not define
+%% is taken for the outside world, which sits outside of every scope.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec path(Name :: name(), Paths :: #{name() => path()}) -> path().
-path(Name, Paths) ->
-    maps:get(Name, Paths, []).
+-spec path(End :: edge_end() | undefined, Paths :: #{name() => path()}) -> path().
+path({Name, _Slot}, Paths) ->
+    maps:get(Name, Paths, []);
+path(undefined, _Paths) ->
+    [].
 
 %%--------------------------------------------------------------------
 %% @doc
