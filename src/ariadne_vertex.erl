@@ -27,9 +27,9 @@
 %%% applies the change on the edge, so a vertex inside of a loop never
 %%% deals with the timestamps of the outside.
 %%%
-%%% The callbacks are pure with respect to delivery: they receive the
-%%% event and the state and return the new state together with what
-%%% to send and what to be notified of. The sending is done by the
+%%% A callback does no sending of its own: it receives the event and
+%%% the state and returns the new state together with what to send
+%%% and what to be notified of, and the sending is done by the
 %%% runtime. The order of the messages returned by one call is kept
 %%% on every edge they are sent along.
 %%%
