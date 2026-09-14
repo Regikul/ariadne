@@ -60,20 +60,11 @@
     loop/2
 ]).
 
--export_type([
-    edge_end/0
-]).
-
 -type name()   :: atom().
--type slot()   :: atom().
 -type vertex() :: #vertex{}.
--type edge()   :: #edge{} | #ingress{} | #egress{} | #feedback{}.
 -type scope()  :: #scope{}.
 -type item()   :: vertex() | edge() | scope().
 -type graph()  :: #graph{}.
-
-%% An end of an edge: a slot of a vertex.
--type edge_end() :: {name(), slot()}.
 
 %% The names of the scopes a vertex sits in, the innermost one first.
 %% A vertex outside of every loop has an empty path.
@@ -105,7 +96,7 @@ graph(Items) ->
 %% slot `To' of a vertex.
 %% @end
 %%--------------------------------------------------------------------
--spec in(Name :: name(), To :: edge_end()) -> edge().
+-spec in(Name :: name(), To :: endpoint()) -> edge().
 in(Name, To) ->
     #edge{
         name = Name,
@@ -118,7 +109,7 @@ in(Name, To) ->
 %% out of the graph.
 %% @end
 %%--------------------------------------------------------------------
--spec out(Name :: name(), From :: edge_end()) -> edge().
+-spec out(Name :: name(), From :: endpoint()) -> edge().
 out(Name, From) ->
     #edge{
         name = Name,
@@ -133,7 +124,7 @@ out(Name, From) ->
 %% in.
 %% @end
 %%--------------------------------------------------------------------
--spec edge(Name :: name(), From :: edge_end(), To :: edge_end()) -> edge().
+-spec edge(Name :: name(), From :: endpoint(), To :: endpoint()) -> edge().
 edge(Name, From, To) ->
     #edge{
         name = Name,
@@ -150,7 +141,7 @@ edge(Name, From, To) ->
 %% graph/1}.
 %% @end
 %%--------------------------------------------------------------------
--spec feedback(Name :: name(), From :: edge_end(), To :: edge_end()) -> edge().
+-spec feedback(Name :: name(), From :: endpoint(), To :: endpoint()) -> edge().
 feedback(Name, From, To) ->
     #feedback{
         name = Name,
@@ -278,7 +269,7 @@ boundary(Edge, _Paths) ->
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec path(End :: edge_end() | undefined, Paths :: #{name() => path()}) -> path().
+-spec path(Endpoint :: endpoint() | undefined, Paths :: #{name() => path()}) -> path().
 path({Name, _Slot}, Paths) ->
     maps:get(Name, Paths, []);
 path(undefined, _Paths) ->

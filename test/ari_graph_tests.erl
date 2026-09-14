@@ -3,8 +3,6 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("../src/ari_graph.hrl").
 
--type edge() :: #edge{} | #ingress{} | #egress{} | #feedback{}.
-
 %%%===================================================================
 %%% Building the description
 %%%===================================================================
@@ -12,7 +10,7 @@
 loop_keeps_its_items_test() ->
     Items = [
         ari_graph:node(prepare, prepare_callback, []),
-        ari_graph:edge(into_done, prepare, is_done)
+        ari_graph:edge(into_done, {prepare, out}, {is_done, in})
     ],
     ?assertEqual(#scope{name = processing, items = Items},
                  ari_graph:loop(processing, Items)).
@@ -69,25 +67,25 @@ nested_scopes_leave_the_innermost_one_on_a_vertex_test() ->
 
 an_edge_into_a_scope_becomes_an_ingress_test() ->
     ?assertMatch(
-        #ingress{from = filter, to = prepare, scope = processing},
+        #ingress{from = {filter, out}, to = {prepare, in}, scope = processing},
         edge(into_processing, example())
     ).
 
 an_edge_out_of_a_scope_becomes_an_egress_test() ->
     ?assertMatch(
-        #egress{from = is_done, to = finalize, scope = processing},
+        #egress{from = {is_done, out}, to = {finalize, in}, scope = processing},
         edge(ready, example())
     ).
 
 an_edge_inside_a_scope_is_left_alone_test() ->
     ?assertMatch(
-        #edge{from = prepare, to = is_done},
+        #edge{from = {prepare, out}, to = {is_done, in}},
         edge(into_done, example())
     ).
 
 a_back_edge_gets_the_name_of_its_scope_test() ->
     ?assertMatch(
-        #feedback{from = is_done, to = prepare, scope = processing},
+        #feedback{from = {is_done, out}, to = {prepare, in}, scope = processing},
         edge(again, example())
     ).
 
@@ -96,12 +94,12 @@ the_place_an_edge_is_written_at_does_not_matter_test() ->
         ari_graph:node(filter, filter_callback, []),
         ari_graph:loop(processing, [
             ari_graph:node(prepare, prepare_callback, []),
-            ari_graph:edge(into_processing, filter, prepare)
+            ari_graph:edge(into_processing, {filter, out}, {prepare, in})
         ])
     ]),
     Outside = ari_graph:graph([
         ari_graph:node(filter, filter_callback, []),
-        ari_graph:edge(into_processing, filter, prepare),
+        ari_graph:edge(into_processing, {filter, out}, {prepare, in}),
         ari_graph:loop(processing, [
             ari_graph:node(prepare, prepare_callback, [])
         ])
@@ -114,8 +112,8 @@ nested_scopes_have_borders_of_their_own_test() ->
             ari_graph:node(outer, outer_callback, []),
             ari_graph:loop(inner_loop, [
                 ari_graph:node(inner, inner_callback, []),
-                ari_graph:edge(descend, outer, inner),
-                ari_graph:edge(ascend, inner, outer)
+                ari_graph:edge(descend, {outer, out}, {inner, in}),
+                ari_graph:edge(ascend, {inner, out}, {outer, in})
             ])
         ])
     ]),
@@ -125,8 +123,8 @@ nested_scopes_have_borders_of_their_own_test() ->
 a_border_written_by_hand_is_left_alone_test() ->
     Border = #ingress{
         name = into_processing,
-        from = filter,
-        to = prepare,
+        from = {filter, out},
+        to = {prepare, in},
         scope = processing
     },
     Graph = ari_graph:graph([
@@ -144,26 +142,26 @@ a_border_written_by_hand_is_left_alone_test() ->
 
 the_ends_of_the_graph_stay_plain_edges_test() ->
     Graph = example(),
-    ?assertMatch(#edge{from = undefined, to = filter}, edge(input, Graph)),
-    ?assertMatch(#edge{from = finalize, to = undefined}, edge(done, Graph)).
+    ?assertMatch(#edge{from = undefined, to = {filter, in}}, edge(input, Graph)),
+    ?assertMatch(#edge{from = {finalize, out}, to = undefined}, edge(done, Graph)).
 
 an_end_of_the_graph_inside_a_loop_becomes_a_border_test() ->
     Graph = ari_graph:graph([
         ari_graph:loop(processing, [
             ari_graph:node(prepare, prepare_callback, []),
-            ari_graph:in(input, prepare),
-            ari_graph:out(output, prepare)
+            ari_graph:in(input, {prepare, in}),
+            ari_graph:out(output, {prepare, out})
         ])
     ]),
-    ?assertMatch(#ingress{to = prepare, scope = processing}, edge(input, Graph)),
-    ?assertMatch(#egress{from = prepare, scope = processing}, edge(output, Graph)).
+    ?assertMatch(#ingress{to = {prepare, in}, scope = processing}, edge(input, Graph)),
+    ?assertMatch(#egress{from = {prepare, out}, scope = processing}, edge(output, Graph)).
 
 an_unknown_name_is_taken_for_the_outside_world_test() ->
     Graph = ari_graph:graph([
         ari_graph:node(filter, filter_callback, []),
-        ari_graph:edge(nowhere_to_filter, nowhere, filter)
+        ari_graph:edge(nowhere_to_filter, {nowhere, out}, {filter, in})
     ]),
-    ?assertMatch(#edge{from = nowhere, to = filter}, edge(nowhere_to_filter, Graph)).
+    ?assertMatch(#edge{from = {nowhere, out}, to = {filter, in}}, edge(nowhere_to_filter, Graph)).
 
 %%%===================================================================
 %%% What is not told apart yet
@@ -176,14 +174,14 @@ an_unknown_name_is_taken_for_the_outside_world_test() ->
 an_edge_crossing_two_borders_is_left_alone_test() ->
     Graph = ari_graph:graph([
         ari_graph:node(source, source_callback, []),
-        ari_graph:edge(straight_in, source, inner),
+        ari_graph:edge(straight_in, {source, out}, {inner, in}),
         ari_graph:loop(outer_loop, [
             ari_graph:loop(inner_loop, [
                 ari_graph:node(inner, inner_callback, [])
             ])
         ])
     ]),
-    ?assertMatch(#edge{from = source, to = inner}, edge(straight_in, Graph)).
+    ?assertMatch(#edge{from = {source, out}, to = {inner, in}}, edge(straight_in, Graph)).
 
 %% Neighbouring scopes are of one and the same depth, but of different
 %% loops, so an edge between them is neither an ingress nor an egress.
@@ -194,10 +192,10 @@ an_edge_between_neighbouring_scopes_is_left_alone_test() ->
         ]),
         ari_graph:loop(right_loop, [
             ari_graph:node(right, right_callback, []),
-            ari_graph:edge(sideways, left, right)
+            ari_graph:edge(sideways, {left, out}, {right, in})
         ])
     ]),
-    ?assertMatch(#edge{from = left, to = right}, edge(sideways, Graph)).
+    ?assertMatch(#edge{from = {left, out}, to = {right, in}}, edge(sideways, Graph)).
 
 %%%===================================================================
 %%% Helpers
@@ -207,18 +205,18 @@ an_edge_between_neighbouring_scopes_is_left_alone_test() ->
 -spec example() -> #graph{}.
 example() ->
     ari_graph:graph([
-        ari_graph:in(input, filter),
+        ari_graph:in(input, {filter, in}),
         ari_graph:node(filter, filter_callback, []),
         ari_graph:loop(processing, [
-            ari_graph:edge(into_processing, filter, prepare),
+            ari_graph:edge(into_processing, {filter, out}, {prepare, in}),
             ari_graph:node(prepare, prepare_callback, #{foo => bar}),
-            ari_graph:edge(into_done, prepare, is_done),
+            ari_graph:edge(into_done, {prepare, out}, {is_done, in}),
             ari_graph:node(is_done, is_done_callback, []),
-            ari_graph:feedback(again, is_done, prepare)
+            ari_graph:feedback(again, {is_done, out}, {prepare, in})
         ]),
-        ari_graph:edge(ready, is_done, finalize),
+        ari_graph:edge(ready, {is_done, out}, {finalize, in}),
         ari_graph:node(finalize, finalize_callback, []),
-        ari_graph:out(done, finalize)
+        ari_graph:out(done, {finalize, out})
     ]).
 
 %% The vertices of the graph, in the order they were written in.

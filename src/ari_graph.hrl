@@ -9,35 +9,38 @@
     scope = undefined :: atom()
 }).
 
-%% A channel between two vertices of one and the same scope. An end
-%% left `undefined' is the outside world.
+%% An endpoint of a channel: a slot of a vertex.
+-type endpoint() :: {Vertex :: atom(), Slot :: atom()}.
+
+%% A channel between two vertices of one and the same scope. An
+%% endpoint left `undefined' is the outside world.
 -record(edge, {
     name :: atom(),
-    from = undefined :: ari_graph:edge_end() | undefined,
-    to  = undefined :: ari_graph:edge_end() | undefined
+    from = undefined :: endpoint() | undefined,
+    to  = undefined :: endpoint() | undefined
 }).
 
 %% A channel leading into the scope `scope'.
 -record(ingress, {
     name :: atom(),
-    from :: ari_graph:edge_end(),
-    to   :: ari_graph:edge_end(),
+    from :: endpoint(),
+    to   :: endpoint(),
     scope :: atom()
 }).
 
 %% A channel leading out of the scope `scope'.
 -record(egress, {
     name :: atom(),
-    from :: ari_graph:edge_end(),
-    to   :: ari_graph:edge_end(),
+    from :: endpoint(),
+    to   :: endpoint(),
     scope :: atom()
 }).
 
 %% The back edge of the loop of the scope `scope'.
 -record(feedback, {
     name :: atom(),
-    from :: ari_graph:edge_end(),
-    to   :: ari_graph:edge_end(),
+    from :: endpoint(),
+    to   :: endpoint(),
     scope :: atom()
 }).
 
@@ -47,10 +50,13 @@
     items :: [term()]
 }).
 
+%% A channel of any kind.
+-type edge() :: #edge{} | #ingress{} | #egress{} | #feedback{}.
+
 %% A logical graph with every scope unfolded.
 -record(graph, {
     nodes :: [#vertex{}],
-    edges :: [#edge{} | #ingress{} | #egress{} | #feedback{}]
+    edges :: [edge()]
 }).
 
 -endif.
