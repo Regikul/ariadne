@@ -1,7 +1,7 @@
 -module(ari_graph_tests).
 
 -include_lib("eunit/include/eunit.hrl").
--include("../src/ari_graph.hrl").
+-include("ari_graph.hrl").
 
 %%%===================================================================
 %%% Building the description
