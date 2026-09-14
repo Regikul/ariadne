@@ -264,6 +264,13 @@ init(Plan, Vertex) ->
 %% notification whose time is complete. A message is taken off the
 %% queue; a notification is left where it is until it is delivered.
 %%
+%% The notifications are tried in the order of their times: a time
+%% precedes every time following it in the order of terms, so a
+%% notification is not blocked by any of those tried after it, and
+%% the earliest one is usually complete. Telling whether a time is
+%% complete is the expensive part, and the order keeps the number of
+%% times it is told close to the number of notifications delivered.
+%%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
@@ -274,9 +281,11 @@ next(#runtime{queue = Queue} = Runtime) ->
         {{value, Event}, Queue2} ->
             {message, Event, Runtime#runtime{queue = Queue2}};
         {empty, _Queue} ->
-            Requested = [{Vertex, Time} || {{vertex, Vertex}, Time} := _Count <- Runtime#runtime.pending],
-            case lists:search(fun(Notification) -> complete(Notification, Runtime) end, Requested) of
-                {value, {Vertex, Time}} -> {notification, Vertex, Time};
+            Requested = lists:sort(
+                [{Time, Vertex} || {{vertex, Vertex}, Time} := _Count <- Runtime#runtime.pending]
+            ),
+            case lists:search(fun({Time, Vertex}) -> complete({Vertex, Time}, Runtime) end, Requested) of
+                {value, {Time, Vertex}} -> {notification, Vertex, Time};
                 false -> idle
             end
     end.
