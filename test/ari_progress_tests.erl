@@ -12,19 +12,19 @@ an_input_is_open_at_epoch_0_test() ->
     ?assertEqual(ok, ari_progress:check_open(input, 5, P)).
 
 closing_shuts_the_epochs_up_to_the_one_given_test() ->
-    P = ari_progress:close(input, 1, ari_progress:new([input])),
-    ?assertError({closed, {input, 0}}, ari_progress:check_open(input, 0, P)),
-    ?assertError({closed, {input, 1}}, ari_progress:check_open(input, 1, P)),
+    {ok, P} = ari_progress:close(input, 1, ari_progress:new([input])),
+    ?assertEqual({error, {closed, {input, 0}}}, ari_progress:check_open(input, 0, P)),
+    ?assertEqual({error, {closed, {input, 1}}}, ari_progress:check_open(input, 1, P)),
     ?assertEqual(ok, ari_progress:check_open(input, 2, P)).
 
 closing_an_epoch_closed_already_changes_nothing_test() ->
-    P = ari_progress:close(input, 3, ari_progress:new([input])),
-    ?assertEqual(P, ari_progress:close(input, 1, P)).
+    {ok, P} = ari_progress:close(input, 3, ari_progress:new([input])),
+    ?assertEqual({ok, P}, ari_progress:close(input, 1, P)).
 
 an_unknown_input_is_refused_test() ->
     P = ari_progress:new([input]),
-    ?assertError({unknown_input, other}, ari_progress:check_open(other, 0, P)),
-    ?assertError({unknown_input, other}, ari_progress:close(other, 0, P)).
+    ?assertEqual({error, {unknown_input, other}}, ari_progress:check_open(other, 0, P)),
+    ?assertEqual({error, {unknown_input, other}}, ari_progress:close(other, 0, P)).
 
 %%%===================================================================
 %%% The counts
@@ -32,14 +32,14 @@ an_unknown_input_is_refused_test() ->
 
 work_added_keeps_a_time_from_completing_test() ->
     T = ari_vtime:new(0),
-    P0 = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
     ?assert(ari_progress:complete(summaries(), {second, T}, P0)),
     P1 = ari_progress:apply({[], [{{edge, link}, T}]}, P0),
     ?assertNot(ari_progress:complete(summaries(), {second, T}, P1)).
 
 work_is_counted_item_by_item_test() ->
     T = ari_vtime:new(0),
-    P0 = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
     P1 = ari_progress:apply({[], [{{edge, link}, T}, {{edge, link}, T}]}, P0),
     P2 = ari_progress:apply({[{{edge, link}, T}], []}, P1),
     ?assertNot(ari_progress:complete(summaries(), {second, T}, P2)),
@@ -52,10 +52,10 @@ work_is_added_before_it_is_released_test() ->
     P1 = ari_progress:apply({[{{edge, link}, T}], [{{edge, link}, T}]}, P0),
     ?assertEqual(P0, P1).
 
-releasing_work_never_added_is_refused_test() ->
+releasing_work_never_added_fails_test() ->
     T = ari_vtime:new(0),
     ?assertError(
-        {nothing_outstanding, {{edge, link}, T}},
+        {unbalanced, {{edge, link}, T}},
         ari_progress:apply({[{{edge, link}, T}], []}, ari_progress:new([input]))
     ).
 
@@ -66,28 +66,29 @@ releasing_work_never_added_is_refused_test() ->
 an_open_input_keeps_its_epoch_from_completing_test() ->
     P = ari_progress:new([input]),
     ?assertNot(ari_progress:complete(summaries(), {second, ari_vtime:new(0)}, P)),
-    ?assert(ari_progress:complete(summaries(), {second, ari_vtime:new(0)}, ari_progress:close(input, 0, P))).
+    {ok, Closed} = ari_progress:close(input, 0, P),
+    ?assert(ari_progress:complete(summaries(), {second, ari_vtime:new(0)}, Closed)).
 
 an_open_input_reaches_no_further_than_its_first_open_epoch_test() ->
-    P = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P} = ari_progress:close(input, 0, ari_progress:new([input])),
     ?assertNot(ari_progress:complete(summaries(), {second, ari_vtime:new(1)}, P)),
     ?assert(ari_progress:complete(summaries(), {second, ari_vtime:new(0)}, P)).
 
 work_downstream_does_not_keep_a_time_from_completing_test() ->
     T = ari_vtime:new(0),
-    P0 = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
     P1 = ari_progress:apply({[], [{{edge, link}, T}]}, P0),
     ?assert(ari_progress:complete(summaries(), {first, T}, P1)).
 
 the_notification_itself_does_not_keep_its_time_from_completing_test() ->
     T = ari_vtime:new(0),
-    P0 = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
     P1 = ari_progress:apply({[], [{{vertex, second}, T}]}, P0),
     ?assert(ari_progress:complete(summaries(), {second, T}, P1)).
 
 a_notification_upstream_keeps_a_time_from_completing_test() ->
     T = ari_vtime:new(0),
-    P0 = ari_progress:close(input, 0, ari_progress:new([input])),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
     P1 = ari_progress:apply({[], [{{vertex, first}, T}]}, P0),
     ?assertNot(ari_progress:complete(summaries(), {second, T}, P1)).
 

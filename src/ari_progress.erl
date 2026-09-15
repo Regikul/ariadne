@@ -27,7 +27,8 @@
 -export_type([
     t/0,
     pointstamp/0,
-    delta/0
+    delta/0,
+    refusal/0
 ]).
 
 %% A place of the graph work is outstanding at: a message waiting on
@@ -38,6 +39,12 @@
 %% took one item of work off, and the pointstamps it put one on. A
 %% pointstamp put on is listed once per item.
 -type delta() :: {Released :: [pointstamp()], Added :: [pointstamp()]}.
+
+%% Why a push or a closing was refused: the caller named an input
+%% the graph has not, or an epoch closed already. A refusal is the
+%% caller's fault and leaves the progress as it was; the counts
+%% not adding up (see {@link apply/2}) is not a refusal but a failure.
+-type refusal() :: {unknown_input, atom()} | {closed, {atom(), non_neg_integer()}}.
 
 -record(progress, {
     %% How many items of work are outstanding at every pointstamp.
@@ -65,16 +72,16 @@ new(Inputs) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Checks that items of epoch `Epoch' may be pushed on the input
-%% `Input'. Fails with `{unknown_input, Input}' if there is no such
+%% `Input'. Refuses with `{unknown_input, Input}' if there is no such
 %% input and with `{closed, {Input, Epoch}}' if the epoch was closed.
 %% @end
 %%--------------------------------------------------------------------
--spec check_open(Input :: atom(), Epoch :: non_neg_integer(), t()) -> ok.
+-spec check_open(Input :: atom(), Epoch :: non_neg_integer(), t()) -> ok | {error, refusal()}.
 check_open(Input, Epoch, #progress{inputs = Inputs}) ->
     case Inputs of
-        #{Input := Open} when Epoch < Open -> error({closed, {Input, Epoch}});
+        #{Input := Open} when Epoch < Open -> {error, {closed, {Input, Epoch}}};
         #{Input := _Open} -> ok;
-        _ -> error({unknown_input, Input})
+        _ -> {error, {unknown_input, Input}}
     end.
 
 %%--------------------------------------------------------------------
@@ -84,14 +91,14 @@ check_open(Input, Epoch, #progress{inputs = Inputs}) ->
 %% may complete. Closing an epoch that is closed already changes
 %% nothing.
 %%
-%% Fails with `{unknown_input, Input}' if there is no such input.
+%% Refuses with `{unknown_input, Input}' if there is no such input.
 %% @end
 %%--------------------------------------------------------------------
--spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> t().
+-spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> {ok, t()} | {error, refusal()}.
 close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
     case Inputs of
-        #{Input := Open} -> Progress#progress{inputs = Inputs#{Input := max(Open, Epoch + 1)}};
-        _ -> error({unknown_input, Input})
+        #{Input := Open} -> {ok, Progress#progress{inputs = Inputs#{Input := max(Open, Epoch + 1)}}};
+        _ -> {error, {unknown_input, Input}}
     end.
 
 %%--------------------------------------------------------------------
@@ -99,8 +106,9 @@ close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
 %% Applies the delta `Delta': the work added is counted first, the
 %% work released is taken off afterwards.
 %%
-%% Fails with `{nothing_outstanding, Pointstamp}' if the delta
-%% releases work at a pointstamp with none.
+%% Fails with `{unbalanced, Pointstamp}' if the delta releases work
+%% at a pointstamp with none: the deltas fed do not add up, and the
+%% progress is not to be trusted any more.
 %% @end
 %%--------------------------------------------------------------------
 -spec apply(delta(), t()) -> t().
@@ -151,5 +159,5 @@ release(Pointstamp, Pending) ->
     case Pending of
         #{Pointstamp := 1} -> maps:remove(Pointstamp, Pending);
         #{Pointstamp := N} -> Pending#{Pointstamp := N - 1};
-        _ -> error({nothing_outstanding, Pointstamp})
+        _ -> error({unbalanced, Pointstamp})
     end.

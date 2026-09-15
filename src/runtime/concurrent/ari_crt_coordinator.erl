@@ -9,6 +9,21 @@
 %%% applies the deltas the workers report, and tells the workers when
 %%% a notification is due. It runs no vertex itself.
 %%%
+%%% The items of a push are spread over the workers one by one, in
+%%% turn. Whoever puts an item on the way to another process counts
+%%% it as work outstanding before sending it, and the receiver
+%%% releases it once delivered: the coordinator counts the items of
+%%% a push before handing them to the workers, and a worker reports
+%%% the delivery of every event of its engine, see {@link report/3}.
+%%% Since every worker reports in the order it delivers in, the
+%%% coordinator never sees work released before it was counted.
+%%%
+%%% A notification a worker asks for is remembered along with the
+%%% worker. Whenever the progress changes -- a delta is applied or an
+%%% epoch is closed -- the coordinator tells whether the time of
+%%% every notification remembered is complete, and tells the workers
+%%% to deliver those that are, the earliest times first.
+%%%
 %%% The coordinator is the last process of the branch to start. Once
 %%% up, it finds the workers in the group `workers' of the scope of
 %%% the runtime, asks every one of them its number and wires them
@@ -26,7 +41,8 @@
 -export([
     start_link/3,
     push/4,
-    close/3
+    close/3,
+    report/3
 ]).
 
 -export([
@@ -41,7 +57,12 @@
     plan :: ari_plan:t(),
     progress :: ari_progress:t(),
     count :: pos_integer(),
-    workers :: tuple() | undefined
+    workers :: tuple() | undefined,
+    %% The number of the worker the next item pushed goes to.
+    next :: pos_integer(),
+    %% The workers that asked for every notification not told to be
+    %% delivered yet.
+    asked :: #{{Vertex :: atom(), ari_vtime:t()} => [pid()]}
 }).
 
 %%--------------------------------------------------------------------
@@ -59,24 +80,44 @@ start_link(Name, Plan, Count) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Pushes the items `Messages' into the input `Input' at epoch
-%% `Epoch', see {@link ari_concurrent_runtime:push/4}.
+%% `Epoch', see {@link ari_concurrent_runtime:push/4}. Returns once
+%% the items are counted and handed to the workers.
+%%
+%% Refuses with `{unknown_input, Input}' if the graph has no such
+%% input and with `{closed, {Input, Epoch}}' if the epoch was closed;
+%% the coordinator goes on.
 %% @end
 %%--------------------------------------------------------------------
 -spec push(
     Coordinator :: pid(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]
-) -> ok.
+) -> ok | {error, ari_progress:refusal()}.
 push(Coordinator, Input, Epoch, Messages) ->
     gen_server:call(Coordinator, {push, Input, Epoch, Messages}).
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Closes the epoch `Epoch' of the input `Input', see {@link
+%% Closes the epochs up to `Epoch' of the input `Input', see {@link
 %% ari_concurrent_runtime:close/3}.
+%%
+%% Refuses with `{unknown_input, Input}' if the graph has no such
+%% input; the coordinator goes on.
 %% @end
 %%--------------------------------------------------------------------
--spec close(Coordinator :: pid(), Input :: atom(), Epoch :: non_neg_integer()) -> ok.
+-spec close(Coordinator :: pid(), Input :: atom(), Epoch :: non_neg_integer()) ->
+    ok | {error, ari_progress:refusal()}.
 close(Coordinator, Input, Epoch) ->
     gen_server:call(Coordinator, {close, Input, Epoch}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Reports the delta `Delta' of the deliveries the worker `Worker'
+%% made, see {@link ari_progress:delta()}. The reports of a worker
+%% are applied in the order they are made in.
+%% @end
+%%--------------------------------------------------------------------
+-spec report(Coordinator :: pid(), Worker :: pid(), ari_progress:delta()) -> ok.
+report(Coordinator, Worker, Delta) ->
+    gen_server:cast(Coordinator, {delta, Worker, Delta}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -89,7 +130,9 @@ init({Name, Plan, Count}) ->
         name = Name,
         plan = Plan,
         progress = ari_progress:new(ari_plan:inputs(Plan)),
-        count = Count
+        count = Count,
+        next = 1,
+        asked = #{}
     },
     {ok, Coordinator, {continue, wire}}.
 
@@ -103,12 +146,97 @@ handle_continue(wire, #coordinator{name = Name, count = Count} = Coordinator) ->
     {noreply, Coordinator#coordinator{workers = Workers}}.
 
 %% @private
-%% Not done yet: the calls are taken and nothing is done about them.
-handle_call({push, _Input, _Epoch, _Messages}, _From, Coordinator) ->
-    {reply, ok, Coordinator};
-handle_call({close, _Input, _Epoch}, _From, Coordinator) ->
-    {reply, ok, Coordinator}.
+handle_call({push, Input, Epoch, Messages}, _From, #coordinator{progress = Progress} = Coordinator) ->
+    case ari_progress:check_open(Input, Epoch, Progress) of
+        ok ->
+            Time = ari_vtime:new(Epoch),
+            Counted = ari_progress:apply({[], [{{edge, Input}, Time} || _ <- Messages]}, Progress),
+            Next = feed(Input, Time, Messages, Coordinator),
+            {reply, ok, Coordinator#coordinator{progress = Counted, next = Next}};
+        {error, _Reason} = Error ->
+            {reply, Error, Coordinator}
+    end;
+handle_call({close, Input, Epoch}, _From, #coordinator{progress = Progress} = Coordinator) ->
+    case ari_progress:close(Input, Epoch, Progress) of
+        {ok, Closed} ->
+            {reply, ok, dispatch(Coordinator#coordinator{progress = Closed})};
+        {error, _Reason} = Error ->
+            {reply, Error, Coordinator}
+    end.
 
 %% @private
-handle_cast(_Request, Coordinator) ->
-    {noreply, Coordinator}.
+handle_cast({delta, Worker, {_Released, Added} = Delta}, Coordinator) ->
+    #coordinator{progress = Progress, asked = Asked} = Coordinator,
+    Applied = ari_progress:apply(Delta, Progress),
+    Asked2 = lists:foldl(
+        fun
+            ({{vertex, Vertex}, Time}, Acc) ->
+                maps:update_with({Vertex, Time}, fun(Ws) -> [Worker | Ws] end, [Worker], Acc);
+            ({{edge, _Edge}, _Time}, Acc) ->
+                Acc
+        end,
+        Asked,
+        Added
+    ),
+    {noreply, dispatch(Coordinator#coordinator{progress = Applied, asked = Asked2})}.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Hands the items `Messages' of time `Time' of the input `Input' to
+%% the workers one by one, in turn, starting with the worker next in
+%% turn. Every worker is given its items in the order they were
+%% pushed in. Returns the number of the worker next in turn.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec feed(Input :: atom(), ari_vtime:t(), Messages :: [term()], #coordinator{}) -> pos_integer().
+feed(Input, Time, Messages, #coordinator{workers = Workers, count = Count, next = Next}) ->
+    {Batches, Next2} = lists:foldl(
+        fun(Message, {Acc, N}) ->
+            {maps:update_with(N, fun(Ms) -> [Message | Ms] end, [Message], Acc), N rem Count + 1}
+        end,
+        {#{}, Next},
+        Messages
+    ),
+    maps:foreach(
+        fun(N, Reversed) ->
+            ari_crt_worker:feed(element(N, Workers), Input, Time, lists:reverse(Reversed))
+        end,
+        Batches
+    ),
+    Next2.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Tells the workers to deliver every notification asked for whose
+%% time is complete, the earliest times first, and forgets those
+%% notifications. A worker never asks for a notification again once
+%% it was told to deliver it: a time complete for a vertex stays so.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec dispatch(#coordinator{}) -> #coordinator{}.
+dispatch(#coordinator{plan = Plan, progress = Progress, asked = Asked} = Coordinator) ->
+    Summaries = ari_plan:summaries(Plan),
+    Ordered = lists:sort([{Time, Vertex} || {Vertex, Time} := _Workers <- Asked]),
+    Remaining = lists:foldl(
+        fun({Time, Vertex}, Acc) ->
+            case ari_progress:complete(Summaries, {Vertex, Time}, Progress) of
+                true ->
+                    Workers = maps:get({Vertex, Time}, Acc),
+                    lists:foreach(fun(W) -> ari_crt_worker:notify(W, Vertex, Time) end, Workers),
+                    maps:remove({Vertex, Time}, Acc);
+                false ->
+                    Acc
+            end
+        end,
+        Asked,
+        Ordered
+    ),
+    Coordinator#coordinator{asked = Remaining}.

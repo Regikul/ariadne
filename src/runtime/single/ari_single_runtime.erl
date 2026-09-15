@@ -93,8 +93,10 @@ new(Graph) ->
 %%--------------------------------------------------------------------
 -spec push(Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()], t()) -> t().
 push(Input, Epoch, Messages, #runtime{engine = Engine, progress = Progress} = Runtime) ->
-    ok = ari_progress:check_open(Input, Epoch, Progress),
-    track(ari_engine:push(Input, Messages, ari_vtime:new(Epoch), Engine), Runtime).
+    case ari_progress:check_open(Input, Epoch, Progress) of
+        ok -> track(ari_engine:push(Input, Messages, ari_vtime:new(Epoch), Engine), Runtime);
+        {error, Reason} -> error(Reason)
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -108,7 +110,10 @@ push(Input, Epoch, Messages, #runtime{engine = Engine, progress = Progress} = Ru
 %%--------------------------------------------------------------------
 -spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> t().
 close(Input, Epoch, #runtime{progress = Progress} = Runtime) ->
-    Runtime#runtime{progress = ari_progress:close(Input, Epoch, Progress)}.
+    case ari_progress:close(Input, Epoch, Progress) of
+        {ok, Closed} -> Runtime#runtime{progress = Closed};
+        {error, Reason} -> error(Reason)
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

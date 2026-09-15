@@ -24,8 +24,11 @@
 %%%
 %%% The inputs are fed as in {@link ari_single_runtime}: items enter
 %%% in epochs, and an epoch is closed once no more items of it are to
-%%% come. The outputs are delivered as messages to the processes subscribed to
-%%% them, see {@link subscribe/2}.
+%%% come. The items of an input are spread over the workers, so the
+%%% order they were pushed in is kept by every worker on its own. The
+%%% outputs are delivered as messages to the processes subscribed to
+%%% them, see {@link subscribe/2}; the items of every worker come in
+%%% the order they left in, and the workers are not ordered.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -64,20 +67,32 @@ child_spec(Name, Graph, Workers) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Pushes the items `Messages' into the input `Input' of the runtime
-%% `Name' at epoch `Epoch'.
+%% `Name' at epoch `Epoch'. The items are spread over the workers and
+%% delivered in the order given by every worker; the call returns
+%% once they are handed over.
+%%
+%% Refuses with `{unknown_input, Input}' if the graph has no such
+%% input and with `{closed, {Input, Epoch}}' if the epoch was closed.
 %% @end
 %%--------------------------------------------------------------------
--spec push(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]) -> ok.
+-spec push(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]) ->
+    ok | {error, ari_progress:refusal()}.
 push(Name, Input, Epoch, Messages) ->
     ari_crt_coordinator:push(coordinator(Name), Input, Epoch, Messages).
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Closes the epoch `Epoch' of the input `Input' of the runtime
-%% `Name': no more items of the epoch are to be pushed.
+%% Closes the epochs up to `Epoch' of the input `Input' of the
+%% runtime `Name': no more items of those epochs are to be pushed,
+%% and the times they contribute to may complete. Closing an epoch
+%% that is closed already changes nothing.
+%%
+%% Refuses with `{unknown_input, Input}' if the graph has no such
+%% input.
 %% @end
 %%--------------------------------------------------------------------
--spec close(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer()) -> ok.
+-spec close(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer()) ->
+    ok | {error, ari_progress:refusal()}.
 close(Name, Input, Epoch) ->
     ari_crt_coordinator:close(coordinator(Name), Input, Epoch).
 
@@ -99,7 +114,7 @@ subscribe(Name, Output) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The coordinator of the runtime `Name'. Fails with `{not_running,
+%% The coordinator of the runtime `Name'. Exits with `{not_running,
 %% Name}' if there is none.
 %%
 %% @private
@@ -109,5 +124,5 @@ subscribe(Name, Output) ->
 coordinator(Name) ->
     case pg:get_local_members(Name, coordinator) of
         [Coordinator] -> Coordinator;
-        [] -> error({not_running, Name})
+        [] -> exit({not_running, Name})
     end.
