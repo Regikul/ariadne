@@ -13,7 +13,7 @@
 %%%
 %%% ```
 %%% %% in the supervisor of the application:
-%%% ari_concurrent_runtime:child_spec(counting, Graph, 4),
+%%% ari_concurrent_runtime:child_spec(counting, Graph, #{workers => 4}),
 %%%
 %%% %% in the process feeding the graph:
 %%% ok = ari_concurrent_runtime:subscribe(counting, done),
@@ -38,6 +38,26 @@
 %%% is spread by the key rather than in turn. The order kept is that
 %%% of the items one worker hands to another.
 %%%
+%%% The items pushed are queued inside the runtime until delivered,
+%%% and so are the messages the vertices send; the runtime never
+%%% drops one. The queues are bounded by the option `max_in_flight':
+%%% as long as as many messages as the limit or more are on their
+%%% way -- pushed or sent and not delivered yet -- a push waits, and
+%%% goes on once enough of them are delivered. A push is never split,
+%%% so the messages on their way come short of the limit plus one
+%%% push. Notifications are not counted: their times complete only
+%%% once the producer closes the epochs, and a producer waiting in a
+%%% push cannot. Closing waits for nothing.
+%%%
+%%% The limit bounds what enters from the outside. What one item
+%%% turns into inside the graph -- the messages a vertex sends, the
+%%% iterations of a loop -- is the working set of the graph and is
+%%% bounded by the graph alone: a loop that does not converge or a
+%%% vertex sending without measure grows the queues whatever the
+%%% limit. Neither does the runtime look after the mailboxes of the
+%%% subscribers: a subscriber slower than the graph piles up its
+%%% items like any process does.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -52,22 +72,34 @@
     subscribe/2
 ]).
 
+-export_type([
+    opts/0
+]).
+
+%% The options of a runtime: how many workers run the graph, and
+%% how many messages may be on their way inside the runtime before
+%% a push waits, `infinity' by default.
+-type opts() :: #{
+    workers := pos_integer(),
+    max_in_flight => pos_integer() | infinity
+}.
+
 %%--------------------------------------------------------------------
 %% @doc
 %% The child specification of a runtime of the graph `Graph' named
-%% `Name' and run by `Workers' workers, to be put under a supervisor
-%% of the application. The name is the name of the `pg' scope of the
+%% `Name' with the options `Opts', to be put under a supervisor of
+%% the application. The name is the name of the `pg' scope of the
 %% runtime, so one name serves one runtime on a node. The graph is
 %% prepared when the branch starts, see {@link ari_plan:prepare/1},
-%% whose errors the start fails with.
+%% whose errors the start fails with, as it does with options that
+%% are not what {@link opts()} says.
 %% @end
 %%--------------------------------------------------------------------
--spec child_spec(Name :: atom(), Graph :: #graph{}, Workers :: pos_integer()) ->
-    supervisor:child_spec().
-child_spec(Name, Graph, Workers) ->
+-spec child_spec(Name :: atom(), Graph :: #graph{}, opts()) -> supervisor:child_spec().
+child_spec(Name, Graph, Opts) ->
     #{
         id => Name,
-        start => {ari_concurrent_sup, start_link, [Name, Graph, Workers]},
+        start => {ari_concurrent_sup, start_link, [Name, Graph, Opts]},
         type => supervisor,
         shutdown => infinity
     }.
@@ -77,7 +109,9 @@ child_spec(Name, Graph, Workers) ->
 %% Pushes the items `Messages' into the input `Input' of the runtime
 %% `Name' at epoch `Epoch'. The items are spread over the workers and
 %% delivered in the order given by every worker; the call returns
-%% once they are handed over.
+%% once they are handed over, which it waits for as long as the
+%% messages on their way are at the limit, see `max_in_flight' in
+%% {@link opts()}. The pushes waiting are taken in the order made.
 %%
 %% Refuses with `{unknown_input, Input}' if the graph has no such
 %% input and with `{closed, {Input, Epoch}}' if the epoch was closed.

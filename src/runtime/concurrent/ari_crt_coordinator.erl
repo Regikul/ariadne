@@ -24,6 +24,15 @@
 %%% latter holds on one node only: the runtime is not to be spread
 %%% over several without another way to order the reports.
 %%%
+%%% A push is taken as long as fewer messages than the limit of the
+%%% runtime are on their way, see {@link ari_progress:in_flight/1};
+%%% otherwise it is put in line and answered once a report brings
+%%% the messages on their way below the limit, the pushes in line
+%%% taken in the order they came in, as many as there is room for.
+%%% Whether the epoch is open is checked when the push is taken, so
+%%% a push in line into an epoch closed meanwhile is refused. Closing
+%%% never waits.
+%%%
 %%% A notification a worker asks for is remembered along with the
 %%% worker. Whenever the progress changes -- a delta is applied or an
 %%% epoch is closed -- the coordinator tells whether the time of
@@ -45,7 +54,7 @@
 -behaviour(gen_server).
 
 -export([
-    start_link/3,
+    start_link/4,
     push/4,
     close/3,
     report/3
@@ -66,28 +75,39 @@
     workers :: tuple() | undefined,
     %% The number of the worker the next item pushed goes to.
     next :: pos_integer(),
+    %% How many messages may be on their way before a push waits.
+    limit :: pos_integer() | infinity,
+    %% The pushes waiting for room, the earliest first.
+    waiting :: queue:queue(push()),
     %% The workers that asked for every notification not told to be
     %% delivered yet.
     asked :: #{{Vertex :: atom(), ari_vtime:t()} => [pid()]}
 }).
 
+%% A push waiting for room, with whom to answer.
+-type push() ::
+    {gen_server:from(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]}.
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the coordinator of the runtime `Name' of the graph of plan
-%% `Plan' run by `Count' workers. The coordinator joins the group
+%% `Plan' run by `Count' workers, with `Limit' messages allowed on
+%% their way before a push waits. The coordinator joins the group
 %% `coordinator' of the scope of the runtime.
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(Name :: atom(), ari_plan:t(), Count :: pos_integer()) ->
-    {ok, pid()} | {error, term()}.
-start_link(Name, Plan, Count) ->
-    gen_server:start_link(?MODULE, {Name, Plan, Count}, []).
+-spec start_link(
+    Name :: atom(), ari_plan:t(), Count :: pos_integer(), Limit :: pos_integer() | infinity
+) -> {ok, pid()} | {error, term()}.
+start_link(Name, Plan, Count, Limit) ->
+    gen_server:start_link(?MODULE, {Name, Plan, Count, Limit}, []).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Pushes the items `Messages' into the input `Input' at epoch
 %% `Epoch', see {@link ari_concurrent_runtime:push/4}. Returns once
-%% the items are counted and handed to the workers.
+%% the items are counted and handed to the workers, which it waits
+%% for as long as there is no room for them.
 %%
 %% Refuses with `{unknown_input, Input}' if the graph has no such
 %% input and with `{closed, {Input, Epoch}}' if the epoch was closed;
@@ -98,7 +118,7 @@ start_link(Name, Plan, Count) ->
     Coordinator :: pid(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]
 ) -> ok | {error, ari_progress:refusal()}.
 push(Coordinator, Input, Epoch, Messages) ->
-    gen_server:call(Coordinator, {push, Input, Epoch, Messages}).
+    gen_server:call(Coordinator, {push, Input, Epoch, Messages}, infinity).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -130,7 +150,7 @@ report(Coordinator, Worker, Delta) ->
 %%%===================================================================
 
 %% @private
-init({Name, Plan, Count}) ->
+init({Name, Plan, Count, Limit}) ->
     ok = pg:join(Name, coordinator, self()),
     Coordinator = #coordinator{
         name = Name,
@@ -138,6 +158,8 @@ init({Name, Plan, Count}) ->
         progress = ari_progress:new(ari_plan:inputs(Plan)),
         count = Count,
         next = 1,
+        limit = Limit,
+        waiting = queue:new(),
         asked = #{}
     },
     {ok, Coordinator, {continue, wire}}.
@@ -152,15 +174,14 @@ handle_continue(wire, #coordinator{name = Name, count = Count} = Coordinator) ->
     {noreply, Coordinator#coordinator{workers = Workers}}.
 
 %% @private
-handle_call({push, Input, Epoch, Messages}, _From, #coordinator{progress = Progress} = Coordinator) ->
-    case ari_progress:check_open(Input, Epoch, Progress) of
-        ok ->
-            Time = ari_vtime:new(Epoch),
-            Counted = ari_progress:apply({[], [{{edge, Input}, Time} || _ <- Messages]}, Progress),
-            Next = feed(Input, Time, Messages, Coordinator),
-            {reply, ok, Coordinator#coordinator{progress = Counted, next = Next}};
-        {error, _Reason} = Error ->
-            {reply, Error, Coordinator}
+handle_call({push, Input, Epoch, Messages}, From, #coordinator{waiting = Waiting} = Coordinator) ->
+    Push = {From, Input, Epoch, Messages},
+    case queue:is_empty(Waiting) andalso room(Coordinator) of
+        true ->
+            {Reply, Coordinator2} = take(Push, Coordinator),
+            {reply, Reply, Coordinator2};
+        false ->
+            {noreply, Coordinator#coordinator{waiting = queue:in(Push, Waiting)}}
     end;
 handle_call({close, Input, Epoch}, _From, #coordinator{progress = Progress} = Coordinator) ->
     case ari_progress:close(Input, Epoch, Progress) of
@@ -184,11 +205,68 @@ handle_cast({delta, Worker, {_Released, Added} = Delta}, Coordinator) ->
         Asked,
         Added
     ),
-    {noreply, dispatch(Coordinator#coordinator{progress = Applied, asked = Asked2})}.
+    {noreply, dispatch(admit(Coordinator#coordinator{progress = Applied, asked = Asked2}))}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Whether there is room for a push: fewer messages than the limit
+%% are on their way. A number is less than the atom `infinity'.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec room(#coordinator{}) -> boolean().
+room(#coordinator{progress = Progress, limit = Limit}) ->
+    ari_progress:in_flight(Progress) < Limit.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Takes the push `Push': counts its items and hands them to the
+%% workers, or refuses it, see {@link push/4}. Returns the reply due
+%% to the pusher.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec take(push(), #coordinator{}) -> {ok | {error, ari_progress:refusal()}, #coordinator{}}.
+take({_From, Input, Epoch, Messages}, #coordinator{progress = Progress} = Coordinator) ->
+    case ari_progress:check_open(Input, Epoch, Progress) of
+        ok ->
+            Time = ari_vtime:new(Epoch),
+            Counted = ari_progress:apply({[], [{{edge, Input}, Time} || _ <- Messages]}, Progress),
+            Next = feed(Input, Time, Messages, Coordinator),
+            {ok, Coordinator#coordinator{progress = Counted, next = Next}};
+        {error, _Reason} = Error ->
+            {Error, Coordinator}
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Takes the pushes waiting in line and answers them, the earliest
+%% first, as long as there is room.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec admit(#coordinator{}) -> #coordinator{}.
+admit(#coordinator{waiting = Waiting} = Coordinator) ->
+    case queue:out(Waiting) of
+        {{value, {From, _Input, _Epoch, _Messages} = Push}, Waiting2} ->
+            case room(Coordinator) of
+                true ->
+                    {Reply, Coordinator2} = take(Push, Coordinator#coordinator{waiting = Waiting2}),
+                    gen_server:reply(From, Reply),
+                    admit(Coordinator2);
+                false ->
+                    Coordinator
+            end;
+        {empty, Waiting} ->
+            Coordinator
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

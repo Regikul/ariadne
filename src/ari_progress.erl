@@ -21,6 +21,7 @@
     check_open/3,
     close/3,
     apply/2,
+    in_flight/1,
     complete/3
 ]).
 
@@ -49,6 +50,8 @@
 -record(progress, {
     %% How many items of work are outstanding at every pointstamp.
     pending :: #{pointstamp() => pos_integer()},
+    %% How many of them are messages, i.e. outstanding on an edge.
+    in_flight :: non_neg_integer(),
     %% The first open epoch of every input.
     inputs :: #{atom() => non_neg_integer()}
 }).
@@ -66,6 +69,7 @@
 new(Inputs) ->
     #progress{
         pending = #{},
+        in_flight = 0,
         inputs = #{Input => 0 || Input <- Inputs}
     }.
 
@@ -112,13 +116,26 @@ close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec apply(delta(), t()) -> t().
-apply({Released, Added}, #progress{pending = Pending} = Progress) ->
+apply({Released, Added}, #progress{pending = Pending, in_flight = InFlight} = Progress) ->
     Counted = lists:foldl(
         fun(Pointstamp, Acc) -> maps:update_with(Pointstamp, fun(N) -> N + 1 end, 1, Acc) end,
         Pending,
         Added
     ),
-    Progress#progress{pending = lists:foldl(fun release/2, Counted, Released)}.
+    Progress#progress{
+        pending = lists:foldl(fun release/2, Counted, Released),
+        in_flight = InFlight + messages(Added) - messages(Released)
+    }.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The number of messages on their way: the items of work
+%% outstanding on the edges, the notifications left aside.
+%% @end
+%%--------------------------------------------------------------------
+-spec in_flight(t()) -> non_neg_integer().
+in_flight(#progress{in_flight = InFlight}) ->
+    InFlight.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -146,6 +163,17 @@ complete(Summaries, {Vertex, Time}, #progress{pending = Pending, inputs = Inputs
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% How many of the pointstamps `Pointstamps' are on edges.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec messages([pointstamp()]) -> non_neg_integer().
+messages(Pointstamps) ->
+    length([Edge || {{edge, Edge}, _Time} <- Pointstamps]).
 
 %%--------------------------------------------------------------------
 %% @doc

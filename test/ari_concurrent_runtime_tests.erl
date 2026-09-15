@@ -36,7 +36,21 @@ the_branch_refuses_a_broken_graph_test() ->
     Broken = ari_graph:graph([
         ari_graph:in(input, {nowhere, in})
     ]),
-    ?assertMatch({error, {{unknown_vertex, {input, nowhere}}, _}}, ari_concurrent_sup:start_link(broken, Broken, 1)).
+    ?assertMatch(
+        {error, {{unknown_vertex, {input, nowhere}}, _}},
+        ari_concurrent_sup:start_link(broken, Broken, #{workers => 1})
+    ).
+
+the_branch_refuses_bad_options_test() ->
+    process_flag(trap_exit, true),
+    ?assertMatch(
+        {error, {{bad_option, {workers, undefined}}, _}},
+        ari_concurrent_sup:start_link(unworked, chain(), #{})
+    ),
+    ?assertMatch(
+        {error, {{bad_option, {max_in_flight, 0}}, _}},
+        ari_concurrent_sup:start_link(unlimited, chain(), #{workers => 1, max_in_flight => 0})
+    ).
 
 %%%===================================================================
 %%% The calls
@@ -107,6 +121,63 @@ a_long_queue_is_delivered_over_several_rounds_test() ->
     Items = lists:seq(1, 2500),
     ok = ari_concurrent_runtime:push(long, input, 0, Items),
     ?assertEqual(Items, [Item || {Item, _Time} <- receive_n(2500, long, output)]),
+    stop(Sup).
+
+%%%===================================================================
+%%% The limit
+%%%===================================================================
+
+a_push_waits_while_the_messages_on_their_way_are_at_the_limit_test() ->
+    Sup = start(limited, chain(), #{workers => 1, max_in_flight => 2}),
+    ok = ari_concurrent_runtime:subscribe(limited, output),
+    [Worker] = pg:get_local_members(limited, workers),
+    ok = sys:suspend(Worker),
+    ok = ari_concurrent_runtime:push(limited, input, 0, [a, b]),
+    Pusher = push_from_another_process(limited, input, 0, [c]),
+    wait_until_blocked(Pusher),
+    ?assertEqual(nothing, receive_pushed()),
+    ok = sys:resume(Worker),
+    ?assertEqual(ok, receive_pushed()),
+    T = ari_vtime:new(0),
+    ?assertEqual([{a, T}, {b, T}, {c, T}], receive_n(3, limited, output)),
+    stop(Sup).
+
+the_pushes_waiting_are_taken_in_the_order_made_test() ->
+    Sup = start(lined_up, chain(), #{workers => 1, max_in_flight => 1}),
+    ok = ari_concurrent_runtime:subscribe(lined_up, output),
+    [Worker] = pg:get_local_members(lined_up, workers),
+    ok = sys:suspend(Worker),
+    ok = ari_concurrent_runtime:push(lined_up, input, 0, [a]),
+    lists:foreach(
+        fun(Item) -> wait_until_blocked(push_from_another_process(lined_up, input, 0, [Item])) end,
+        [b, c, d]
+    ),
+    ok = sys:resume(Worker),
+    ?assertEqual([ok, ok, ok], [receive_pushed() || _ <- [b, c, d]]),
+    T = ari_vtime:new(0),
+    ?assertEqual([{a, T}, {b, T}, {c, T}, {d, T}], receive_n(4, lined_up, output)),
+    stop(Sup).
+
+closing_never_waits_test() ->
+    Sup = start(closing, chain(), #{workers => 1, max_in_flight => 1}),
+    [Worker] = pg:get_local_members(closing, workers),
+    ok = sys:suspend(Worker),
+    ok = ari_concurrent_runtime:push(closing, input, 0, [a]),
+    wait_until_blocked(push_from_another_process(closing, input, 1, [b])),
+    ?assertEqual(ok, ari_concurrent_runtime:close(closing, input, 0)),
+    ok = sys:resume(Worker),
+    ?assertEqual(ok, receive_pushed()),
+    stop(Sup).
+
+a_push_waiting_into_an_epoch_closed_meanwhile_is_refused_test() ->
+    Sup = start(late, chain(), #{workers => 1, max_in_flight => 1}),
+    [Worker] = pg:get_local_members(late, workers),
+    ok = sys:suspend(Worker),
+    ok = ari_concurrent_runtime:push(late, input, 0, [a]),
+    wait_until_blocked(push_from_another_process(late, input, 0, [b])),
+    ok = ari_concurrent_runtime:close(late, input, 0),
+    ok = sys:resume(Worker),
+    ?assertEqual({error, {closed, {input, 0}}}, receive_pushed()),
     stop(Sup).
 
 %%%===================================================================
@@ -215,10 +286,12 @@ an_epoch_left_open_keeps_the_later_ones_from_completing_test() ->
 %% the_branch_is_embedded_by_its_child_spec_test.
 init(Graph) ->
     Flags = #{strategy => one_for_one, intensity => 0, period => 1},
-    {ok, {Flags, [ari_concurrent_runtime:child_spec(embedded, Graph, 1)]}}.
+    {ok, {Flags, [ari_concurrent_runtime:child_spec(embedded, Graph, #{workers => 1})]}}.
 
-start(Name, Graph, Workers) ->
-    {ok, Sup} = ari_concurrent_sup:start_link(Name, Graph, Workers),
+start(Name, Graph, Workers) when is_integer(Workers) ->
+    start(Name, Graph, #{workers => Workers});
+start(Name, Graph, Opts) ->
+    {ok, Sup} = ari_concurrent_sup:start_link(Name, Graph, Opts),
     Sup.
 
 %% Shuts the branch down the way a supervisor above would.
@@ -228,6 +301,30 @@ stop(Sup) ->
     exit(Sup, shutdown),
     receive
         {'DOWN', Ref, process, Sup, shutdown} -> ok
+    end.
+
+%% Pushes from a process of its own, which reports the reply as
+%% `{pushed, Reply}'.
+push_from_another_process(Name, Input, Epoch, Messages) ->
+    Test = self(),
+    spawn_link(fun() -> Test ! {pushed, ari_concurrent_runtime:push(Name, Input, Epoch, Messages)} end).
+
+%% The reply of a push made from another process, or `nothing' if
+%% none came within a while.
+receive_pushed() ->
+    receive
+        {pushed, Reply} -> Reply
+    after 100 ->
+        nothing
+    end.
+
+%% Waits until the process `Pid' is stuck in a receive: a pusher
+%% has no other place to wait but inside its call, so its message
+%% has reached the coordinator by then.
+wait_until_blocked(Pid) ->
+    case process_info(Pid, status) of
+        {status, waiting} -> ok;
+        {status, _} -> wait_until_blocked(Pid)
     end.
 
 %% Everything received under the tag `Tag' so far.

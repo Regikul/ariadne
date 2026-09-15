@@ -31,18 +31,20 @@
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the branch of the runtime of the graph `Graph' named
-%% `Name' and run by `Workers' workers, see {@link ari_concurrent_runtime:child_spec/3}.
+%% `Name' with the options `Opts', see {@link
+%% ari_concurrent_runtime:child_spec/3}.
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(Name :: atom(), Graph :: #graph{}, Workers :: pos_integer()) ->
+-spec start_link(Name :: atom(), Graph :: #graph{}, ari_concurrent_runtime:opts()) ->
     {ok, pid()} | {error, term()}.
-start_link(Name, Graph, Workers) ->
-    supervisor:start_link(?MODULE, {Name, Graph, Workers}).
+start_link(Name, Graph, Opts) ->
+    supervisor:start_link(?MODULE, {Name, Graph, Opts}).
 
 %% @private
--spec init({Name :: atom(), #graph{}, Workers :: pos_integer()}) ->
+-spec init({Name :: atom(), #graph{}, ari_concurrent_runtime:opts()}) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
-init({Name, Graph, Count}) ->
+init({Name, Graph, Opts}) ->
+    {Count, Limit} = options(Opts),
     Plan = ari_plan:prepare(Graph),
     Scope = #{
         id => pg,
@@ -57,7 +59,31 @@ init({Name, Graph, Count}) ->
     ],
     Coordinator = #{
         id => coordinator,
-        start => {ari_crt_coordinator, start_link, [Name, Plan, Count]}
+        start => {ari_crt_coordinator, start_link, [Name, Plan, Count, Limit]}
     },
     Flags = #{strategy => one_for_all, intensity => 0, period => 1},
     {ok, {Flags, [Scope | Workers] ++ [Coordinator]}}.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The number of workers and the limit of the messages on their way
+%% out of the options `Opts'. Fails with `{bad_option, Option}' on
+%% an option that is not what {@link ari_concurrent_runtime:opts()}
+%% says.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec options(ari_concurrent_runtime:opts()) ->
+    {Count :: pos_integer(), Limit :: pos_integer() | infinity}.
+options(Opts) ->
+    Count = maps:get(workers, Opts, undefined),
+    is_integer(Count) andalso Count >= 1 orelse error({bad_option, {workers, Count}}),
+    Limit = maps:get(max_in_flight, Opts, infinity),
+    Limit =:= infinity orelse (is_integer(Limit) andalso Limit >= 1) orelse
+        error({bad_option, {max_in_flight, Limit}}),
+    {Count, Limit}.

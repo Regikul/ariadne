@@ -52,6 +52,17 @@ work_is_added_before_it_is_released_test() ->
     P1 = ari_progress:apply({[{{edge, link}, T}], [{{edge, link}, T}]}, P0),
     ?assertEqual(P0, P1).
 
+the_messages_on_their_way_are_the_work_on_the_edges_test() ->
+    T = ari_vtime:new(0),
+    P0 = ari_progress:new([input]),
+    ?assertEqual(0, ari_progress:in_flight(P0)),
+    P1 = ari_progress:apply({[], [{{edge, link}, T}, {{edge, link}, T}, {{vertex, second}, T}]}, P0),
+    ?assertEqual(2, ari_progress:in_flight(P1)),
+    P2 = ari_progress:apply({[{{edge, link}, T}, {{vertex, second}, T}], [{{edge, out}, T}]}, P1),
+    ?assertEqual(2, ari_progress:in_flight(P2)),
+    P3 = ari_progress:apply({[{{edge, link}, T}, {{edge, out}, T}], []}, P2),
+    ?assertEqual(0, ari_progress:in_flight(P3)).
+
 releasing_work_never_added_fails_test() ->
     T = ari_vtime:new(0),
     ?assertError(
