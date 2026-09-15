@@ -27,6 +27,15 @@
 %%% vertex the name of the scope it sits in, so that a coordinate of a
 %%% timestamp can be told from the loop it counts.
 %%%
+%%% An edge of any kind may carry options, see `edge_opts()' in
+%%% `ari_graph.hrl'. The one option there is, `key', partitions the
+%%% items of the edge: a runtime running several copies of the graph
+%%% delivers the items of one key to one and the same copy of the
+%%% vertex the edge leads to, so that a vertex keeping state by key
+%%% sees every item of the key. The kind of an edge is about the
+%%% time of its items; the key is about the place, and the two are
+%%% independent.
+%%%
 %%% Example usage:
 %%%
 %%% ```
@@ -55,7 +64,10 @@
 
 -export([
     graph/1,
-    in/2, out/2, edge/3, feedback/3,
+    edge/3, edge/4,
+    in/2, in/3,
+    feedback/3, feedback/4,
+    out/2,
     node/3,
     loop/2
 ]).
@@ -107,9 +119,20 @@ graph(Items) ->
 %%--------------------------------------------------------------------
 -spec in(Name :: name(), To :: endpoint()) -> edge().
 in(Name, To) ->
+    in(Name, To, #{}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Builds an edge bringing the items of the outside world into the
+%% slot `To' of a vertex, with the options `Opts'.
+%% @end
+%%--------------------------------------------------------------------
+-spec in(Name :: name(), To :: endpoint(), Opts :: edge_opts()) -> edge().
+in(Name, To, Opts) ->
     #edge{
         name = Name,
-        to = To
+        to = To,
+        opts = Opts
     }.
 
 %%--------------------------------------------------------------------
@@ -135,10 +158,22 @@ out(Name, From) ->
 %%--------------------------------------------------------------------
 -spec edge(Name :: name(), From :: endpoint(), To :: endpoint()) -> edge().
 edge(Name, From, To) ->
+    edge(Name, From, To, #{}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Builds an edge from the slot `From' of one vertex to the slot `To'
+%% of another, with the options `Opts'. The options are kept whether
+%% the edge stays a plain edge or becomes a boundary of a scope.
+%% @end
+%%--------------------------------------------------------------------
+-spec edge(Name :: name(), From :: endpoint(), To :: endpoint(), Opts :: edge_opts()) -> edge().
+edge(Name, From, To, Opts) ->
     #edge{
         name = Name,
         from = From,
-        to = To
+        to = To,
+        opts = Opts
     }.
 
 %%--------------------------------------------------------------------
@@ -152,10 +187,22 @@ edge(Name, From, To) ->
 %%--------------------------------------------------------------------
 -spec feedback(Name :: name(), From :: endpoint(), To :: endpoint()) -> edge().
 feedback(Name, From, To) ->
+    feedback(Name, From, To, #{}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Builds the back edge of a loop with the options `Opts', see {@link
+%% feedback/3}.
+%% @end
+%%--------------------------------------------------------------------
+-spec feedback(Name :: name(), From :: endpoint(), To :: endpoint(), Opts :: edge_opts()) ->
+    edge().
+feedback(Name, From, To, Opts) ->
     #feedback{
         name = Name,
         from = From,
-        to = To
+        to = To,
+        opts = Opts
     }.
 
 %%--------------------------------------------------------------------
@@ -268,16 +315,16 @@ unfold([Edge | Rest], Path, Nodes, Edges) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec boundary(Edge :: edge(), Paths :: #{name() => path()}) -> edge().
-boundary(#edge{name = Name, from = From, to = To} = Edge, Paths) ->
+boundary(#edge{name = Name, from = From, to = To, opts = Opts} = Edge, Paths) ->
     FromPath = path(From, Paths),
     ToPath = path(To, Paths),
     case {FromPath, ToPath} of
         {Path, Path} ->
             Edge;
         {_, [Scope | FromPath]} ->
-            #ingress{name = Name, from = From, to = To, scope = Scope};
+            #ingress{name = Name, from = From, to = To, scope = Scope, opts = Opts};
         {[Scope | ToPath], _} ->
-            #egress{name = Name, from = From, to = To, scope = Scope};
+            #egress{name = Name, from = From, to = To, scope = Scope, opts = Opts};
         _ ->
             Edge
     end;

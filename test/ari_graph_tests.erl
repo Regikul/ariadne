@@ -137,6 +137,41 @@ a_border_written_by_hand_is_left_alone_test() ->
     ?assertEqual(Border, edge(into_processing, Graph)).
 
 %%%===================================================================
+%%% Options
+%%%===================================================================
+
+an_edge_without_options_has_none_test() ->
+    ?assertMatch(#edge{opts = #{}}, edge(into_done, example())),
+    ?assertMatch(#feedback{opts = #{}}, edge(again, example())).
+
+an_edge_keeps_its_options_test() ->
+    Key = fun({K, _V}) -> K end,
+    Graph = ari_graph:graph([
+        ari_graph:node(filter, filter_callback, []),
+        ari_graph:in(input, {filter, in}, #{key => Key}),
+        ari_graph:edge(next, {filter, out}, {prepare, in}, #{key => Key}),
+        ari_graph:node(prepare, prepare_callback, [])
+    ]),
+    ?assertMatch(#edge{opts = #{key := Key}}, edge(input, Graph)),
+    ?assertMatch(#edge{opts = #{key := Key}}, edge(next, Graph)).
+
+a_border_keeps_the_options_of_the_edge_it_was_test() ->
+    Key = fun({K, _V}) -> K end,
+    Graph = ari_graph:graph([
+        ari_graph:node(filter, filter_callback, []),
+        ari_graph:edge(descend, {filter, out}, {prepare, in}, #{key => Key}),
+        ari_graph:loop(processing, [
+            ari_graph:node(prepare, prepare_callback, []),
+            ari_graph:feedback(again, {prepare, continue}, {prepare, in}, #{key => Key})
+        ]),
+        ari_graph:edge(ascend, {prepare, out}, {finalize, in}, #{key => Key}),
+        ari_graph:node(finalize, finalize_callback, [])
+    ]),
+    ?assertMatch(#ingress{opts = #{key := Key}}, edge(descend, Graph)),
+    ?assertMatch(#egress{opts = #{key := Key}}, edge(ascend, Graph)),
+    ?assertMatch(#feedback{opts = #{key := Key}}, edge(again, Graph)).
+
+%%%===================================================================
 %%% The outside world
 %%%===================================================================
 

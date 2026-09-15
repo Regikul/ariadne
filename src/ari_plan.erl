@@ -33,6 +33,7 @@
     vertex/2,
     edges/1,
     edge/2,
+    key/2,
     outgoing/2,
     inputs/1,
     outputs/1,
@@ -60,10 +61,13 @@
 -type slots() :: #{atom() => {Inputs :: [atom()], Outputs :: [atom()]}}.
 
 %% A prepared edge. An end left `undefined' is the outside world.
+%% The key is the partitioning of the edge, see `edge_opts()' in
+%% `ari_graph.hrl', or `undefined' for an edge not partitioned.
 -record(pedge, {
     kind :: kind(),
     from :: endpoint() | undefined,
-    to :: endpoint() | undefined
+    to :: endpoint() | undefined,
+    key :: fun((term()) -> term()) | undefined
 }).
 
 -record(plan, {
@@ -158,6 +162,20 @@ edge(#plan{edges = Edges}, Name) ->
 
 %%--------------------------------------------------------------------
 %% @doc
+%% The key the items of the edge `Name' are partitioned by, see
+%% `edge_opts()' in `ari_graph.hrl', or `undefined' if the edge is
+%% not partitioned.
+%%
+%% Fails with `{badkey, Name}' if the plan has no such edge.
+%% @end
+%%--------------------------------------------------------------------
+-spec key(Plan :: t(), Name :: atom()) -> fun((term()) -> term()) | undefined.
+key(#plan{edges = Edges}, Name) ->
+    #pedge{key = Key} = maps:get(Name, Edges),
+    Key.
+
+%%--------------------------------------------------------------------
+%% @doc
 %% The names of the edges leaving the output slot `From', in the
 %% order they were written in. A message sent to the slot goes along
 %% every one of them. An output slot no edge is attached to yields an
@@ -234,8 +252,9 @@ prepare_vertices(Nodes) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Prepares the edges: checks that no name is used twice, that every
-%% end is a slot of the right side of a vertex of the graph, and that
-%% the edge agrees with the scopes of its ends.
+%% end is a slot of the right side of a vertex of the graph, that the
+%% edge agrees with the scopes of its ends and that its options are
+%% well-formed.
 %%
 %% @private
 %% @end
@@ -245,27 +264,54 @@ prepare_vertices(Nodes) ->
 prepare_edges(Edges, Vertices, Slots) ->
     lists:foldl(
         fun(Edge, Prepared) ->
-            {Name, Kind, From, To} = unpack(Edge),
+            {Name, Kind, From, To, Opts} = unpack(Edge),
             is_map_key(Name, Prepared) andalso error({duplicate_edge, Name}),
             check_endpoint(Name, From, outputs, Slots),
             check_endpoint(Name, To, inputs, Slots),
             check_scopes(Edge, scope_of(From, Vertices), scope_of(To, Vertices)),
-            Prepared#{Name => #pedge{kind = Kind, from = From, to = To}}
+            Key = check_opts(Name, To, Opts),
+            Prepared#{Name => #pedge{kind = Kind, from = From, to = To, key = Key}}
         end,
         #{},
         Edges
     ).
 
 -spec unpack(edge()) ->
-    {atom(), kind(), endpoint() | undefined, endpoint() | undefined}.
-unpack(#edge{name = Name, from = From, to = To}) ->
-    {Name, message, From, To};
-unpack(#ingress{name = Name, from = From, to = To}) ->
-    {Name, ingress, From, To};
-unpack(#egress{name = Name, from = From, to = To}) ->
-    {Name, egress, From, To};
-unpack(#feedback{name = Name, from = From, to = To}) ->
-    {Name, feedback, From, To}.
+    {atom(), kind(), endpoint() | undefined, endpoint() | undefined, edge_opts()}.
+unpack(#edge{name = Name, from = From, to = To, opts = Opts}) ->
+    {Name, message, From, To, Opts};
+unpack(#ingress{name = Name, from = From, to = To, opts = Opts}) ->
+    {Name, ingress, From, To, Opts};
+unpack(#egress{name = Name, from = From, to = To, opts = Opts}) ->
+    {Name, egress, From, To, Opts};
+unpack(#feedback{name = Name, from = From, to = To, opts = Opts}) ->
+    {Name, feedback, From, To, Opts}.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Checks the options of the edge `Edge' leading to `To' and picks
+%% out its key. Fails with `{unknown_option, {Edge, Option}}' on an
+%% option there is not, with `{bad_key, Edge}' if the key is not a
+%% function of one argument and with `{key_on_an_output, Edge}' if
+%% the edge leads out of the graph: there is no vertex to partition
+%% for.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec check_opts(Edge :: atom(), To :: endpoint() | undefined, edge_opts()) ->
+    fun((term()) -> term()) | undefined.
+check_opts(Edge, To, Opts) ->
+    case maps:keys(Opts) -- [key] of
+        [] -> ok;
+        [Option | _] -> error({unknown_option, {Edge, Option}})
+    end,
+    case Opts of
+        #{key := Key} when not is_function(Key, 1) -> error({bad_key, Edge});
+        #{key := _Key} when To =:= undefined -> error({key_on_an_output, Edge});
+        #{key := Key} -> Key;
+        _ -> undefined
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -357,9 +403,9 @@ outgoing_of(Edges) ->
     lists:foldr(
         fun(Edge, Outgoing) ->
             case unpack(Edge) of
-                {_Name, _Kind, undefined, _To} ->
+                {_Name, _Kind, undefined, _To, _Opts} ->
                     Outgoing;
-                {Name, _Kind, From, _To} ->
+                {Name, _Kind, From, _To, _Opts} ->
                     maps:update_with(From, fun(Names) -> [Name | Names] end, [Name], Outgoing)
             end
         end,

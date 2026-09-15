@@ -1,6 +1,7 @@
 -module(ari_plan_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("ari_graph.hrl").
 
 -on_load(define_callbacks/0).
 
@@ -24,6 +25,16 @@ edges_carry_their_kind_and_ends_test() ->
     ?assertEqual({feedback, {is_done, continue}, {prepare, in}}, ari_plan:edge(Plan, again)),
     ?assertEqual({egress, {is_done, done}, {finalize, in}}, ari_plan:edge(Plan, ready)),
     ?assertEqual({message, {finalize, out}, undefined}, ari_plan:edge(Plan, done)).
+
+edges_carry_their_key_test() ->
+    Key = fun({K, _V}) -> K end,
+    Plan = ari_plan:prepare(ari_graph:graph([
+        ari_graph:in(input, {filter, in}, #{key => Key}),
+        ari_graph:node(filter, filter_callback, []),
+        ari_graph:out(done, {filter, out})
+    ])),
+    ?assertEqual(Key, ari_plan:key(Plan, input)),
+    ?assertEqual(undefined, ari_plan:key(Plan, done)).
 
 the_ends_of_the_graph_are_its_inputs_and_outputs_test() ->
     Plan = example(),
@@ -69,6 +80,28 @@ an_edge_name_is_used_once_test() ->
         ari_graph:node(filter, filter_callback, []),
         ari_graph:in(input, {filter, in}),
         ari_graph:in(input, {filter, in})
+    ]))).
+
+%%%===================================================================
+%%% Options
+%%%===================================================================
+
+an_option_has_to_exist_test() ->
+    ?assertError({unknown_option, {input, colour}}, ari_plan:prepare(ari_graph:graph([
+        ari_graph:node(filter, filter_callback, []),
+        ari_graph:in(input, {filter, in}, #{colour => red})
+    ]))).
+
+a_key_is_a_function_of_the_message_test() ->
+    ?assertError({bad_key, input}, ari_plan:prepare(ari_graph:graph([
+        ari_graph:node(filter, filter_callback, []),
+        ari_graph:in(input, {filter, in}, #{key => fun(_A, _B) -> ok end})
+    ]))).
+
+an_output_has_no_key_test() ->
+    ?assertError({key_on_an_output, done}, ari_plan:prepare(ari_graph:graph([
+        ari_graph:node(filter, filter_callback, []),
+        (ari_graph:out(done, {filter, out}))#edge{opts = #{key => fun(M) -> M end}}
     ]))).
 
 %%%===================================================================
@@ -144,8 +177,10 @@ a_border_written_by_hand_has_to_match_the_vertex_test() ->
             ari_graph:node(prepare, filter_callback, [])
         ])
     ]),
-    Border = {ingress, into_processing, {filter, out}, {prepare, in}, elsewhere},
-    Broken = setelement(3, Graph, [Border | element(3, Graph)]),
+    Border = #ingress{
+        name = into_processing, from = {filter, out}, to = {prepare, in}, scope = elsewhere
+    },
+    Broken = Graph#graph{edges = [Border | Graph#graph.edges]},
     ?assertError({scope_mismatch, into_processing}, ari_plan:prepare(Broken)).
 
 %%%===================================================================

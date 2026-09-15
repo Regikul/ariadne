@@ -12,12 +12,19 @@
 %% An endpoint of a channel: a slot of a vertex.
 -type endpoint() :: {Vertex :: atom(), Slot :: atom()}.
 
+%% The options of a channel. `key' partitions the items of the
+%% channel: items of one and the same key are delivered to one and
+%% the same copy of the vertex the channel leads to, however many
+%% copies of the graph the runtime runs.
+-type edge_opts() :: #{key => fun((Message :: term()) -> Key :: term())}.
+
 %% A channel between two vertices of one and the same scope. An
 %% endpoint left `undefined' is the outside world.
 -record(edge, {
     name :: atom(),
     from = undefined :: endpoint() | undefined,
-    to  = undefined :: endpoint() | undefined
+    to  = undefined :: endpoint() | undefined,
+    opts = #{} :: edge_opts()
 }).
 
 %% A channel leading into the scope `scope'. A start left `undefined'
@@ -26,7 +33,8 @@
     name :: atom(),
     from :: endpoint() | undefined,
     to   :: endpoint(),
-    scope :: atom()
+    scope :: atom(),
+    opts = #{} :: edge_opts()
 }).
 
 %% A channel leading out of the scope `scope'. An end left `undefined'
@@ -35,7 +43,8 @@
     name :: atom(),
     from :: endpoint(),
     to   :: endpoint() | undefined,
-    scope :: atom()
+    scope :: atom(),
+    opts = #{} :: edge_opts()
 }).
 
 %% The back edge of the loop of the scope `scope'.
@@ -43,7 +52,8 @@
     name :: atom(),
     from :: endpoint(),
     to   :: endpoint(),
-    scope :: atom()
+    scope :: atom(),
+    opts = #{} :: edge_opts()
 }).
 
 %% A loop scope: a list of items of its own, built by ari_graph:loop/2.
