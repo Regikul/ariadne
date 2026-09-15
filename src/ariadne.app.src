@@ -1,8 +1,7 @@
 {application, ariadne, [
-    {description, "An OTP application"},
+    {description, "A dataflow runtime library"},
     {vsn, "0.1.0"},
     {registered, []},
-    {mod, {ariadne_app, []}},
     {applications, [
         kernel,
         stdlib
