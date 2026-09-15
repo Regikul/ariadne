@@ -208,15 +208,15 @@ feedback(Name, From, To, Opts) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Builds a vertex: the operator `Name' run by the callback module
-%% `Callback' started with `InitArgs'.
+%% `Module' started with `Args'.
 %% @end
 %%--------------------------------------------------------------------
--spec node(Name :: name(), Callback :: module(), InitArgs :: term()) -> vertex().
-node(Name, Callback, InitArgs) ->
+-spec node(Name :: name(), Module :: module(), Args :: term()) -> vertex().
+node(Name, Module, Args) ->
     #vertex{
         name = Name,
-        callback = Callback,
-        args = InitArgs
+        module = Module,
+        args = Args
     }.
 
 %%--------------------------------------------------------------------

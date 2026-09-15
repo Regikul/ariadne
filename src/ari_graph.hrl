@@ -4,7 +4,7 @@
 %% An operator of the graph.
 -record(vertex, {
     name :: atom(),
-    callback :: module(),
+    module :: module(),
     args :: term(),
     scope = undefined :: atom()
 }).

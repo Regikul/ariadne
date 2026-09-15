@@ -36,7 +36,7 @@ graph_keeps_the_order_of_the_edges_test() ->
 
 graph_keeps_the_vertices_as_they_were_written_test() ->
     ?assertMatch(
-        #vertex{callback = prepare_callback, args = #{foo := bar}},
+        #vertex{module = prepare_callback, args = #{foo := bar}},
         vertex(prepare, example())
     ).
 

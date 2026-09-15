@@ -190,9 +190,9 @@ dequeue(#engine{queue = Queue} = Engine) ->
 deliver({Edge, Message, Time}, #engine{plan = Plan, states = States} = Engine) ->
     {Kind, _From, {Vertex, Slot}} = ari_plan:edge(Plan, Edge),
     Arrived = advance(Kind, Time),
-    {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
+    {Module, _Args} = ari_plan:vertex(Plan, Vertex),
     {State, Notifications, Messages} =
-        Callback:handle_message(Slot, Message, Arrived, maps:get(Vertex, States)),
+        Module:handle_message(Slot, Message, Arrived, maps:get(Vertex, States)),
     Engine2 = Engine#engine{states = States#{Vertex := State}},
     {Engine3, Requested} = request(Vertex, Arrived, Notifications, Engine2),
     {Engine4, Sent} = send(Vertex, Arrived, Messages, Engine3),
@@ -212,8 +212,8 @@ deliver({Edge, Message, Time}, #engine{plan = Plan, states = States} = Engine) -
 -spec notify(Vertex :: atom(), ari_vtime:t(), t()) -> {t(), ari_progress:delta()}.
 notify(Vertex, Time, #engine{plan = Plan, states = States, notifications = Requested} = Engine) ->
     is_map_key({Vertex, Time}, Requested) orelse error({unknown_notification, {Vertex, Time}}),
-    {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
-    {State, Messages} = Callback:handle_notification(Time, maps:get(Vertex, States)),
+    {Module, _Args} = ari_plan:vertex(Plan, Vertex),
+    {State, Messages} = Module:handle_notification(Time, maps:get(Vertex, States)),
     Engine2 = Engine#engine{
         states = States#{Vertex := State},
         notifications = maps:remove({Vertex, Time}, Requested)
@@ -297,8 +297,8 @@ stop(#engine{plan = Plan, states = States}) ->
 init(_Plan, [], States) ->
     States;
 init(Plan, [Vertex | Rest], States) ->
-    {Callback, Args} = ari_plan:vertex(Plan, Vertex),
-    try Callback:init(Args) of
+    {Module, Args} = ari_plan:vertex(Plan, Vertex),
+    try Module:init(Args) of
         State -> init(Plan, Rest, States#{Vertex => State})
     catch
         Class:Reason:Stacktrace ->
@@ -317,8 +317,8 @@ init(Plan, [Vertex | Rest], States) ->
 -spec terminate(ari_plan:t(), Vertex :: atom(), State :: term()) ->
     ok | {error | exit | throw, Reason :: term(), Stacktrace :: erlang:stacktrace()}.
 terminate(Plan, Vertex, State) ->
-    {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
-    try Callback:terminate(State) of
+    {Module, _Args} = ari_plan:vertex(Plan, Vertex),
+    try Module:terminate(State) of
         _ -> ok
     catch
         Class:Reason:Stacktrace -> {Class, Reason, Stacktrace}
@@ -369,8 +369,8 @@ request(Vertex, Event, Times, Engine) ->
     t()
 ) -> {t(), [ari_progress:pointstamp()]}.
 send(Vertex, Event, Messages, #engine{plan = Plan} = Engine) ->
-    {Callback, _Args} = ari_plan:vertex(Plan, Vertex),
-    Outputs = Callback:outputs(),
+    {Module, _Args} = ari_plan:vertex(Plan, Vertex),
+    Outputs = Module:outputs(),
     {Engine2, Added} = lists:foldl(
         fun({Slot, Message, Time}, {Acc, AddedAcc}) ->
             lists:member(Slot, Outputs) orelse error({unknown_slot, {Vertex, Slot}}),

@@ -52,7 +52,7 @@
 %% A prepared vertex: the callback module, its arguments and the
 %% scope the vertex sits in.
 -record(pvertex, {
-    callback :: module(),
+    module :: module(),
     args :: term(),
     scope :: atom() | undefined
 }).
@@ -133,10 +133,10 @@ vertices(#plan{vertices = Vertices}) ->
 %% Fails with `{badkey, Name}' if the plan has no such vertex.
 %% @end
 %%--------------------------------------------------------------------
--spec vertex(Plan :: t(), Name :: atom()) -> {Callback :: module(), Args :: term()}.
+-spec vertex(Plan :: t(), Name :: atom()) -> {Module :: module(), Args :: term()}.
 vertex(#plan{vertices = Vertices}, Name) ->
-    #pvertex{callback = Callback, args = Args} = maps:get(Name, Vertices),
-    {Callback, Args}.
+    #pvertex{module = Module, args = Args} = maps:get(Name, Vertices),
+    {Module, Args}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -251,17 +251,17 @@ summaries(#plan{summaries = Summaries}) ->
 -spec prepare_vertices([#vertex{}]) -> {#{atom() => #pvertex{}}, slots()}.
 prepare_vertices(Nodes) ->
     lists:foldl(
-        fun(#vertex{name = Name, callback = Callback, args = Args, scope = Scope}, {Vertices, Slots}) ->
+        fun(#vertex{name = Name, module = Module, args = Args, scope = Scope}, {Vertices, Slots}) ->
             is_map_key(Name, Vertices) andalso error({duplicate_vertex, Name}),
-            Inputs = Callback:inputs(),
-            Outputs = Callback:outputs(),
+            Inputs = Module:inputs(),
+            Outputs = Module:outputs(),
             All = Inputs ++ Outputs,
             case All -- lists:usort(All) of
                 [] -> ok;
                 [Slot | _] -> error({duplicate_slot, {Name, Slot}})
             end,
             {
-                Vertices#{Name => #pvertex{callback = Callback, args = Args, scope = Scope}},
+                Vertices#{Name => #pvertex{module = Module, args = Args, scope = Scope}},
                 Slots#{Name => {Inputs, Outputs}}
             }
         end,
