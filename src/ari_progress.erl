@@ -20,7 +20,6 @@
     new/1,
     check_open/3,
     close/3,
-    seal/2,
     apply/2,
     complete/3
 ]).
@@ -43,9 +42,8 @@
 -record(progress, {
     %% How many items of work are outstanding at every pointstamp.
     pending :: #{pointstamp() => pos_integer()},
-    %% The first open epoch of every input, or `sealed' once no more
-    %% items are to come.
-    inputs :: #{atom() => non_neg_integer() | sealed}
+    %% The first open epoch of every input.
+    inputs :: #{atom() => non_neg_integer()}
 }).
 
 -opaque t() :: #progress{}.
@@ -68,14 +66,12 @@ new(Inputs) ->
 %% @doc
 %% Checks that items of epoch `Epoch' may be pushed on the input
 %% `Input'. Fails with `{unknown_input, Input}' if there is no such
-%% input, with `{closed, {Input, Epoch}}' if the epoch was closed and
-%% with `{sealed, Input}' if the input was sealed.
+%% input and with `{closed, {Input, Epoch}}' if the epoch was closed.
 %% @end
 %%--------------------------------------------------------------------
 -spec check_open(Input :: atom(), Epoch :: non_neg_integer(), t()) -> ok.
 check_open(Input, Epoch, #progress{inputs = Inputs}) ->
     case Inputs of
-        #{Input := sealed} -> error({sealed, Input});
         #{Input := Open} when Epoch < Open -> error({closed, {Input, Epoch}});
         #{Input := _Open} -> ok;
         _ -> error({unknown_input, Input})
@@ -94,23 +90,9 @@ check_open(Input, Epoch, #progress{inputs = Inputs}) ->
 -spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> t().
 close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
     case Inputs of
-        #{Input := sealed} -> Progress;
         #{Input := Open} -> Progress#progress{inputs = Inputs#{Input := max(Open, Epoch + 1)}};
         _ -> error({unknown_input, Input})
     end.
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Seals the input `Input': no more items of any epoch are to be
-%% pushed on it.
-%%
-%% Fails with `{unknown_input, Input}' if there is no such input.
-%% @end
-%%--------------------------------------------------------------------
--spec seal(Input :: atom(), t()) -> t().
-seal(Input, #progress{inputs = Inputs} = Progress) ->
-    is_map_key(Input, Inputs) orelse error({unknown_input, Input}),
-    Progress#progress{inputs = Inputs#{Input := sealed}}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -145,7 +127,7 @@ complete(Summaries, {Vertex, Time}, #progress{pending = Pending, inputs = Inputs
     Self = {{vertex, Vertex}, Time},
     Outstanding =
         [Pointstamp || Pointstamp := _Count <- Pending, Pointstamp =/= Self] ++
-        [{{edge, Input}, ari_vtime:new(Open)} || Input := Open <- Inputs, is_integer(Open)],
+        [{{edge, Input}, ari_vtime:new(Open)} || Input := Open <- Inputs],
     not lists:any(
         fun({Location, From}) ->
             ari_summaries:reaches(Summaries, Location, From, {vertex, Vertex}, Time)

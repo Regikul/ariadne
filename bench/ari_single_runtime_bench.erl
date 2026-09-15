@@ -150,7 +150,7 @@ loaded({pipeline, {K, M}}) ->
         [ari_graph:edge(list_to_atom("to_" ++ atom_to_list(B)), {A, out}, {B, in}) || {A, B} <- Pairs] ++
         [ari_graph:out(output, {lists:last(Vertices), out})]
     )),
-    ari_single_runtime:seal(input, ari_single_runtime:push(input, 0, lists:seq(1, M), R0));
+    ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, lists:seq(1, M), R0));
 loaded({epochs, {E, M}}) ->
     R0 = ari_single_runtime:new(ari_graph:graph([
         ari_graph:in(input, {count, in}),
@@ -163,7 +163,7 @@ loaded({epochs, {E, M}}) ->
         R0,
         lists:seq(0, E - 1)
     ),
-    ari_single_runtime:seal(input, R1);
+    ari_single_runtime:close(input, E - 1, R1);
 loaded({loop, {L, M}}) ->
     R0 = ari_single_runtime:new(ari_graph:graph([
         ari_graph:in(input, {inc, in}),
@@ -173,7 +173,7 @@ loaded({loop, {L, M}}) ->
         ]),
         ari_graph:out(output, {inc, done})
     ])),
-    ari_single_runtime:seal(input, ari_single_runtime:push(input, 0, lists:duplicate(M, 0), R0)).
+    ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, lists:duplicate(M, 0), R0)).
 
 %% The number of steps `run/1' takes for the load.
 -spec steps(load()) -> pos_integer().

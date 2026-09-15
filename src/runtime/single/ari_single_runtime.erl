@@ -45,7 +45,6 @@
     new/1,
     push/4,
     close/3,
-    seal/2,
     step/1,
     run/1,
     pull/2,
@@ -88,9 +87,8 @@ new(Graph) ->
 %% see {@link ari_plan:inputs/1}. They are delivered in the order
 %% given, by the steps to come.
 %%
-%% Fails with `{unknown_input, Input}' if the plan has no such input,
-%% with `{closed, {Input, Epoch}}' if the epoch was closed and with
-%% `{sealed, Input}' if the input was sealed.
+%% Fails with `{unknown_input, Input}' if the plan has no such input
+%% and with `{closed, {Input, Epoch}}' if the epoch was closed.
 %% @end
 %%--------------------------------------------------------------------
 -spec push(Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()], t()) -> t().
@@ -111,18 +109,6 @@ push(Input, Epoch, Messages, #runtime{engine = Engine, progress = Progress} = Ru
 -spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> t().
 close(Input, Epoch, #runtime{progress = Progress} = Runtime) ->
     Runtime#runtime{progress = ari_progress:close(Input, Epoch, Progress)}.
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Seals the input `Input': no more items of any epoch are to be
-%% pushed on it.
-%%
-%% Fails with `{unknown_input, Input}' if the plan has no such input.
-%% @end
-%%--------------------------------------------------------------------
--spec seal(Input :: atom(), t()) -> t().
-seal(Input, #runtime{progress = Progress} = Runtime) ->
-    Runtime#runtime{progress = ari_progress:seal(Input, Progress)}.
 
 %%--------------------------------------------------------------------
 %% @doc

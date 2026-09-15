@@ -95,7 +95,7 @@ a_notification_waits_for_every_input_test() ->
     R2 = ari_single_runtime:push(right, 0, [b], R1),
     R3 = ari_single_runtime:run(ari_single_runtime:close(left, 0, R2)),
     ?assertMatch({[], _}, ari_single_runtime:pull(output, R3)),
-    R4 = ari_single_runtime:run(ari_single_runtime:seal(right, R3)),
+    R4 = ari_single_runtime:run(ari_single_runtime:close(right, 0, R3)),
     ?assertMatch({[{2, _}], _}, ari_single_runtime:pull(output, R4)).
 
 a_closed_epoch_completes_while_a_later_one_is_open_test() ->
@@ -127,7 +127,7 @@ a_notification_asked_for_twice_is_delivered_once_test() ->
         ari_graph:out(output, {waiter, done})
     ])),
     R1 = ari_single_runtime:push(input, 0, [a, b], R0),
-    R2 = ari_single_runtime:run(ari_single_runtime:seal(input, R1)),
+    R2 = ari_single_runtime:run(ari_single_runtime:close(input, 0, R1)),
     ?assertMatch({[{fired, _}], _}, ari_single_runtime:pull(output, R2)).
 
 a_notification_waits_for_the_messages_upstream_test() ->
@@ -140,7 +140,7 @@ a_notification_waits_for_the_messages_upstream_test() ->
         ari_graph:node(count, ari_test_count, []),
         ari_graph:out(output, {count, done})
     ])),
-    R1 = ari_single_runtime:seal(input, ari_single_runtime:push(input, 0, [a, b, c], R0)),
+    R1 = ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, [a, b, c], R0)),
     R2 = ari_single_runtime:run(R1),
     ?assertMatch({[{3, _}], _}, ari_single_runtime:pull(output, R2)).
 
@@ -172,7 +172,7 @@ iterations_complete_one_after_another_test() ->
         ]),
         ari_graph:out(output, {tracker, done})
     ])),
-    R1 = ari_single_runtime:seal(input, ari_single_runtime:push(input, 0, [0], R0)),
+    R1 = ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, [0], R0)),
     R2 = ari_single_runtime:run(R1),
     T0 = ari_vtime:ingress(ari_vtime:new(0)),
     T1 = ari_vtime:feedback(T0),
@@ -196,7 +196,7 @@ an_epoch_does_not_complete_while_the_loop_spins_test() ->
         ari_graph:node(count, ari_test_count, []),
         ari_graph:out(output, {count, done})
     ])),
-    R1 = ari_single_runtime:seal(input, ari_single_runtime:push(input, 0, [0, 3], R0)),
+    R1 = ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, [0, 3], R0)),
     R2 = ari_single_runtime:run(R1),
     ?assertMatch({[{2, _}], _}, ari_single_runtime:pull(output, R2)).
 
@@ -219,8 +219,7 @@ an_output_inside_of_a_loop_leaves_the_loop_test() ->
 an_input_has_to_exist_test() ->
     R = ari_single_runtime:new(passing()),
     ?assertError({unknown_input, nowhere}, ari_single_runtime:push(nowhere, 0, [a], R)),
-    ?assertError({unknown_input, nowhere}, ari_single_runtime:close(nowhere, 0, R)),
-    ?assertError({unknown_input, nowhere}, ari_single_runtime:seal(nowhere, R)).
+    ?assertError({unknown_input, nowhere}, ari_single_runtime:close(nowhere, 0, R)).
 
 an_output_has_to_exist_test() ->
     R = ari_single_runtime:new(passing()),
@@ -236,11 +235,6 @@ closing_an_epoch_again_changes_nothing_test() ->
     R = ari_single_runtime:close(input, 1, ari_single_runtime:new(passing())),
     ?assertEqual(R, ari_single_runtime:close(input, 0, R)),
     ?assertEqual(R, ari_single_runtime:close(input, 1, R)).
-
-a_sealed_input_takes_no_items_test() ->
-    R = ari_single_runtime:seal(input, ari_single_runtime:new(passing())),
-    ?assertError({sealed, input}, ari_single_runtime:push(input, 5, [a], R)),
-    ?assertEqual(R, ari_single_runtime:close(input, 7, R)).
 
 %%%===================================================================
 %%% Misbehaving vertices
