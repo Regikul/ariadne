@@ -50,6 +50,10 @@ the_branch_refuses_bad_options_test() ->
     ?assertMatch(
         {error, {{bad_option, {max_in_flight, 0}}, _}},
         ari_concurrent_sup:start_link(unlimited, chain(), #{workers => 1, max_in_flight => 0})
+    ),
+    ?assertMatch(
+        {error, {{bad_option, {max_heap_size, -1}}, _}},
+        ari_concurrent_sup:start_link(unheaped, chain(), #{workers => 1, max_heap_size => -1})
     ).
 
 %%%===================================================================
@@ -179,6 +183,30 @@ a_push_waiting_into_an_epoch_closed_meanwhile_is_refused_test() ->
     ok = sys:resume(Worker),
     ?assertEqual({error, {closed, {input, 0}}}, receive_pushed()),
     stop(Sup).
+
+%%%===================================================================
+%%% The fuse
+%%%===================================================================
+
+a_worker_outgrowing_the_heap_allowed_stops_the_branch_test() ->
+    process_flag(trap_exit, true),
+    Heap = #{size => 200000, kill => true, error_logger => false},
+    Sup = start(fused, hoarding(), #{workers => 1, max_heap_size => Heap}),
+    [Worker] = pg:get_local_members(fused, workers),
+    Ref = monitor(process, Worker),
+    Pusher = spawn(fun() -> hoard(fused, [{N, N, N, N} || N <- lists:seq(1, 1000)]) end),
+    receive
+        {'DOWN', Ref, process, Worker, Reason} -> ?assertEqual(killed, Reason)
+    after 5000 ->
+        error(worker_still_running)
+    end,
+    receive
+        {'EXIT', Sup, shutdown} -> ok
+    after 5000 ->
+        error(branch_still_running)
+    end,
+    exit(Pusher, kill),
+    ?assertEqual([], pg:get_local_members(fused, workers)).
 
 %%%===================================================================
 %%% The keys
@@ -427,6 +455,20 @@ counting_keyed_edge() ->
         ari_graph:node(count, ari_test_count, []),
         ari_graph:out(output, {count, done})
     ]).
+
+%% A vertex keeping every item.
+hoarding() ->
+    ari_graph:graph([
+        ari_graph:in(input, {hoarder, in}),
+        ari_graph:node(hoarder, ari_test_hoarder, []),
+        ari_graph:out(output, {hoarder, out})
+    ]).
+
+%% Pushes `Items' into the runtime `Name' over and over, until the
+%% runtime is gone.
+hoard(Name, Items) ->
+    ok = ari_concurrent_runtime:push(Name, input, 0, Items),
+    hoard(Name, Items).
 
 %% A vertex reporting its termination to `Pid'.
 reporting(Pid) ->

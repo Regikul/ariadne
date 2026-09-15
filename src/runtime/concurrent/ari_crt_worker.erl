@@ -45,7 +45,7 @@
 -behaviour(gen_server).
 
 -export([
-    start_link/4,
+    start_link/5,
     index/1,
     wire/3,
     feed/4,
@@ -77,16 +77,18 @@
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts worker number `Index' of the `Count' workers of the runtime
-%% `Name' with a copy of the graph of plan `Plan'. Every vertex of
-%% the copy is initialised here, see {@link ari_engine:new/3}, whose
+%% `Name' with a copy of the graph of plan `Plan', spawned with the
+%% options `Spawn' (see `erlang:spawn_opt/4'). Every vertex of the
+%% copy is initialised here, see {@link ari_engine:new/3}, whose
 %% errors the start fails with. The worker joins the group `workers'
 %% of the scope of the runtime.
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(Name :: atom(), Index :: pos_integer(), Count :: pos_integer(), ari_plan:t()) ->
-    {ok, pid()} | {error, term()}.
-start_link(Name, Index, Count, Plan) ->
-    gen_server:start_link(?MODULE, {Name, Index, Count, Plan}, []).
+-spec start_link(
+    Name :: atom(), Index :: pos_integer(), Count :: pos_integer(), ari_plan:t(), Spawn :: [term()]
+) -> {ok, pid()} | {error, term()}.
+start_link(Name, Index, Count, Plan, Spawn) ->
+    gen_server:start_link(?MODULE, {Name, Index, Count, Plan}, [{spawn_opt, Spawn}]).
 
 %%--------------------------------------------------------------------
 %% @doc

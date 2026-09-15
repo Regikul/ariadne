@@ -54,8 +54,15 @@
 %%% iterations of a loop -- is the working set of the graph and is
 %%% bounded by the graph alone: a loop that does not converge or a
 %%% vertex sending without measure grows the queues whatever the
-%%% limit. Neither does the runtime look after the mailboxes of the
-%%% subscribers: a subscriber slower than the graph piles up its
+%%% limit, and a vertex keeping every item grows its state. Against
+%%% such a graph the runtime has a fuse, the option `max_heap_size':
+%%% it is set on the processes of the workers, see the process flag
+%%% of the same name, and once a worker outgrows it the worker is
+%%% killed and the branch stops, for the supervisor above to decide
+%%% about. The pushes waiting exit with the call. The coordinator
+%%% needs no fuse: it keeps counts, not messages, and whatever grows
+%%% in it grows in the workers first. Neither does the runtime look after the mailboxes of
+%%% the subscribers: a subscriber slower than the graph piles up its
 %%% items like any process does.
 %%%
 %%% @end
@@ -76,12 +83,18 @@
     opts/0
 ]).
 
-%% The options of a runtime: how many workers run the graph, and
-%% how many messages may be on their way inside the runtime before
-%% a push waits, `infinity' by default.
+%% The options of a runtime: how many workers run the graph, how
+%% many messages may be on their way inside the runtime before a
+%% push waits, `infinity' by default, and the most heap a worker
+%% may grow to, as the process flag `max_heap_size' takes it, none
+%% by default. The heap holds the garbage not collected yet along
+%% with the state, and every push is copied into the worker, so the
+%% limit is to leave room for a few pushes on top of what the graph
+%% keeps.
 -type opts() :: #{
     workers := pos_integer(),
-    max_in_flight => pos_integer() | infinity
+    max_in_flight => pos_integer() | infinity,
+    max_heap_size => non_neg_integer() | map()
 }.
 
 %%--------------------------------------------------------------------

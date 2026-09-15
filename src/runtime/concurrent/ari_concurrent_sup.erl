@@ -44,7 +44,7 @@ start_link(Name, Graph, Opts) ->
 -spec init({Name :: atom(), #graph{}, ari_concurrent_runtime:opts()}) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init({Name, Graph, Opts}) ->
-    {Count, Limit} = options(Opts),
+    {Count, Limit, Spawn} = options(Opts),
     Plan = ari_plan:prepare(Graph),
     Scope = #{
         id => pg,
@@ -53,7 +53,7 @@ init({Name, Graph, Opts}) ->
     Workers = [
         #{
             id => {worker, Index},
-            start => {ari_crt_worker, start_link, [Name, Index, Count, Plan]}
+            start => {ari_crt_worker, start_link, [Name, Index, Count, Plan, Spawn]}
         }
      || Index <- lists:seq(1, Count)
     ],
@@ -70,20 +70,30 @@ init({Name, Graph, Opts}) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The number of workers and the limit of the messages on their way
-%% out of the options `Opts'. Fails with `{bad_option, Option}' on
-%% an option that is not what {@link ari_concurrent_runtime:opts()}
+%% The number of workers, the limit of the messages on their way and
+%% the options the workers are spawned with, out of the options
+%% `Opts'. Fails with `{bad_option, Option}' on an
+%% option that is not what {@link ari_concurrent_runtime:opts()}
 %% says.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
 -spec options(ari_concurrent_runtime:opts()) ->
-    {Count :: pos_integer(), Limit :: pos_integer() | infinity}.
+    {Count :: pos_integer(), Limit :: pos_integer() | infinity, Spawn :: [term()]}.
 options(Opts) ->
     Count = maps:get(workers, Opts, undefined),
     is_integer(Count) andalso Count >= 1 orelse error({bad_option, {workers, Count}}),
     Limit = maps:get(max_in_flight, Opts, infinity),
     Limit =:= infinity orelse (is_integer(Limit) andalso Limit >= 1) orelse
         error({bad_option, {max_in_flight, Limit}}),
-    {Count, Limit}.
+    Spawn =
+        case Opts of
+            #{max_heap_size := Heap} when is_integer(Heap), Heap >= 0; is_map(Heap) ->
+                [{max_heap_size, Heap}];
+            #{max_heap_size := Heap} ->
+                error({bad_option, {max_heap_size, Heap}});
+            _ ->
+                []
+        end,
+    {Count, Limit, Spawn}.
