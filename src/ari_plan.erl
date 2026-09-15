@@ -34,6 +34,7 @@
     edges/1,
     edge/2,
     key/2,
+    partition/4,
     outgoing/2,
     inputs/1,
     outputs/1,
@@ -173,6 +174,25 @@ edge(#plan{edges = Edges}, Name) ->
 key(#plan{edges = Edges}, Name) ->
     #pedge{key = Key} = maps:get(Name, Edges),
     Key.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The copy of the graph, out of `Count' copies numbered from 1, the
+%% item `Message' of the edge `Name' goes to, or `undefined' if the
+%% edge is not partitioned and the item may go to any copy. Items of
+%% one key go to one copy; the key is evaluated here, and the call
+%% fails with whatever the key fails with.
+%%
+%% Fails with `{badkey, Name}' if the plan has no such edge.
+%% @end
+%%--------------------------------------------------------------------
+-spec partition(Plan :: t(), Name :: atom(), Message :: term(), Count :: pos_integer()) ->
+    pos_integer() | undefined.
+partition(Plan, Name, Message, Count) ->
+    case key(Plan, Name) of
+        undefined -> undefined;
+        Key -> erlang:phash2(Key(Message), Count) + 1
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

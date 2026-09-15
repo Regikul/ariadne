@@ -9,14 +9,20 @@
 %%% applies the deltas the workers report, and tells the workers when
 %%% a notification is due. It runs no vertex itself.
 %%%
-%%% The items of a push are spread over the workers one by one, in
-%%% turn. Whoever puts an item on the way to another process counts
-%%% it as work outstanding before sending it, and the receiver
-%%% releases it once delivered: the coordinator counts the items of
-%%% a push before handing them to the workers, and a worker reports
-%%% the delivery of every event of its engine, see {@link report/3}.
-%%% Since every worker reports in the order it delivers in, the
-%%% coordinator never sees work released before it was counted.
+%%% The items of a push are spread over the workers: by their key if
+%%% the input is partitioned (see {@link ari_plan:partition/4}), one
+%%% by one in turn otherwise. Whoever puts an item on the way to
+%%% another process counts it as work outstanding before sending
+%%% it, and the receiver releases it once delivered: the coordinator
+%%% counts the items of a push before handing them to the workers, a
+%%% worker reports the messages it sends to another worker before
+%%% sending them, and a worker reports the delivery of every event
+%%% of its engine, see {@link report/3}. Since every worker reports
+%%% in the order it delivers in, and a message sent on one node is
+%%% in the mailbox of the receiver before the sender goes on, the
+%%% coordinator never sees work released before it was counted. The
+%%% latter holds on one node only: the runtime is not to be spread
+%%% over several without another way to order the reports.
 %%%
 %%% A notification a worker asks for is remembered along with the
 %%% worker. Whenever the progress changes -- a delta is applied or an
@@ -187,18 +193,24 @@ handle_cast({delta, Worker, {_Released, Added} = Delta}, Coordinator) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Hands the items `Messages' of time `Time' of the input `Input' to
-%% the workers one by one, in turn, starting with the worker next in
-%% turn. Every worker is given its items in the order they were
-%% pushed in. Returns the number of the worker next in turn.
+%% the workers: each to the worker of its key if the input is
+%% partitioned, one by one in turn otherwise, starting with the
+%% worker next in turn. Every worker is given its items in the order
+%% they were pushed in. Returns the number of the worker next in
+%% turn.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
 -spec feed(Input :: atom(), ari_vtime:t(), Messages :: [term()], #coordinator{}) -> pos_integer().
-feed(Input, Time, Messages, #coordinator{workers = Workers, count = Count, next = Next}) ->
+feed(Input, Time, Messages, #coordinator{plan = Plan, workers = Workers, count = Count, next = Next}) ->
     {Batches, Next2} = lists:foldl(
         fun(Message, {Acc, N}) ->
-            {maps:update_with(N, fun(Ms) -> [Message | Ms] end, [Message], Acc), N rem Count + 1}
+            {Worker, N2} = case ari_plan:partition(Plan, Input, Message, Count) of
+                undefined -> {N, N rem Count + 1};
+                Copy -> {Copy, N}
+            end,
+            {maps:update_with(Worker, fun(Ms) -> [Message | Ms] end, [Message], Acc), N2}
         end,
         {#{}, Next},
         Messages

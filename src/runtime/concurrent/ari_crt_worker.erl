@@ -8,25 +8,30 @@
 %%% the messages of its queue and the notifications the coordinator
 %%% tells it are due, and reporting every delivery to the coordinator
 %%% as a delta, see {@link ari_progress:delta/0}. The workers are
-%%% numbered; a worker learns its number at start and the processes
-%%% of the others once the coordinator wires the runtime, see {@link
-%%% wire/3}.
+%%% numbered; a worker learns its number and how many there are at
+%%% start, and the processes of the others once the coordinator
+%%% wires the runtime, see {@link wire/3}.
 %%%
 %%% The worker works in rounds. A round is started by the items the
-%%% coordinator feeds it (see {@link feed/4}) or a notification it
-%%% tells it to deliver (see {@link notify/3}): the worker delivers
-%%% the event and then the messages of its queue until the queue is
-%%% empty or the round has run for as many steps as it is allowed
-%%% to, reports the deltas of the round to the coordinator as one
-%%% delta, and sends the items that left the graph in the round to
-%%% the subscribers of the outputs, as `{ariadne, Name, Output,
-%%% Message, Time}'. A round cut short is followed by another one,
-%%% once whatever else the worker was told meanwhile is taken care
-%%% of.
+%%% coordinator feeds it (see {@link feed/4}), the items another
+%%% worker sends it (see {@link exchange/2}) or a notification the
+%%% coordinator tells it to deliver (see {@link notify/3}): the
+%%% worker delivers the event and then the messages of its queue
+%%% until the queue is empty or the round has run for as many steps
+%%% as it is allowed to; then it reports the deltas of the round to
+%%% the coordinator as one delta, sends the messages its engine put
+%%% in the outbox (see {@link ari_engine:outbox/1}) to the workers
+%%% of the copies they belong to, and sends the items that left the
+%%% graph in the round to the subscribers of the outputs, as
+%%% `{ariadne, Name, Output, Message, Time}'. A round cut short is
+%%% followed by another one, once whatever else the worker was told
+%%% meanwhile is taken care of.
 %%%
-%%% The items fed by the coordinator are counted by the coordinator
-%%% before they are sent, so the worker reports their delivery only,
-%%% see {@link ari_crt_coordinator}.
+%%% Whatever is put on the way to the worker is counted before it is
+%%% sent -- the items of a push by the coordinator, the messages of
+%%% the outbox by the delta of the round they were sent in, which is
+%%% reported before they are sent -- so the worker reports their
+%%% delivery only, see {@link ari_crt_coordinator}.
 %%%
 %%% The callbacks of every vertex of the copy are called from the
 %%% process of the worker; the vertices are terminated when the
@@ -40,10 +45,11 @@
 -behaviour(gen_server).
 
 -export([
-    start_link/3,
+    start_link/4,
     index/1,
     wire/3,
     feed/4,
+    exchange/2,
     notify/3
 ]).
 
@@ -70,17 +76,17 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Starts worker number `Index' of the runtime `Name' with a copy of
-%% the graph of plan `Plan'. Every vertex of the copy is initialised
-%% here, see {@link ari_engine:new/1}, whose errors the start fails
-%% with. The worker joins the group `workers' of the scope of the
-%% runtime.
+%% Starts worker number `Index' of the `Count' workers of the runtime
+%% `Name' with a copy of the graph of plan `Plan'. Every vertex of
+%% the copy is initialised here, see {@link ari_engine:new/3}, whose
+%% errors the start fails with. The worker joins the group `workers'
+%% of the scope of the runtime.
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(Name :: atom(), Index :: pos_integer(), ari_plan:t()) ->
+-spec start_link(Name :: atom(), Index :: pos_integer(), Count :: pos_integer(), ari_plan:t()) ->
     {ok, pid()} | {error, term()}.
-start_link(Name, Index, Plan) ->
-    gen_server:start_link(?MODULE, {Name, Index, Plan}, []).
+start_link(Name, Index, Count, Plan) ->
+    gen_server:start_link(?MODULE, {Name, Index, Count, Plan}, []).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -113,6 +119,17 @@ feed(Worker, Input, Time, Messages) ->
 
 %%--------------------------------------------------------------------
 %% @doc
+%% Hands the worker `Worker' the events `Events' another worker put
+%% in its outbox for it, counted already, see {@link
+%% ari_engine:outbox/1}.
+%% @end
+%%--------------------------------------------------------------------
+-spec exchange(Worker :: pid(), Events :: [ari_engine:event()]) -> ok.
+exchange(Worker, Events) ->
+    gen_server:cast(Worker, {exchange, Events}).
+
+%%--------------------------------------------------------------------
+%% @doc
 %% Tells the worker `Worker' to deliver the notification of `Time'
 %% to the vertex `Vertex' of its copy: the time is complete. The
 %% notification is expected to have been asked for by the worker.
@@ -127,13 +144,13 @@ notify(Worker, Vertex, Time) ->
 %%%===================================================================
 
 %% @private
-init({Name, Index, Plan}) ->
+init({Name, Index, Count, Plan}) ->
     process_flag(trap_exit, true),
     ok = pg:join(Name, workers, self()),
     Worker = #worker{
         name = Name,
         index = Index,
-        engine = ari_engine:new(Plan),
+        engine = ari_engine:new(Plan, Index, Count),
         outputs = ari_plan:outputs(Plan)
     },
     {ok, Worker}.
@@ -146,7 +163,10 @@ handle_call(index, _From, #worker{index = Index} = Worker) ->
 handle_cast({wire, Coordinator, Workers}, Worker) ->
     {noreply, Worker#worker{coordinator = Coordinator, workers = Workers}};
 handle_cast({feed, Input, Time, Messages}, #worker{engine = Engine} = Worker) ->
-    {Engine2, _Counted} = ari_engine:push(Input, Messages, Time, Engine),
+    Engine2 = ari_engine:accept([{Input, Message, Time} || Message <- Messages], Engine),
+    {noreply, round(Worker#worker{engine = Engine2}, {[], []})};
+handle_cast({exchange, Events}, #worker{engine = Engine} = Worker) ->
+    Engine2 = ari_engine:accept(Events, Engine),
     {noreply, round(Worker#worker{engine = Engine2}, {[], []})};
 handle_cast({notify, Vertex, Time}, #worker{engine = Engine} = Worker) ->
     {Engine2, Delta} = ari_engine:notify(Vertex, Time, Engine),
@@ -169,9 +189,14 @@ terminate(_Reason, #worker{engine = Engine}) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Runs a round started with the delta `Delta': delivers the messages
-%% of the queue, reports the deltas of the round as one, and sends
+%% of the queue, reports the deltas of the round as one, sends the
+%% messages of the outbox to the workers they belong to and sends
 %% the items that left the graph to the subscribers. If the round is
 %% cut short, another one is asked for.
+%%
+%% The report goes out before the outbox does, so that the
+%% coordinator counts a message before the worker it goes to can
+%% report its delivery.
 %%
 %% @private
 %% @end
@@ -183,8 +208,9 @@ round(#worker{coordinator = Coordinator} = Worker, Delta) ->
         {[], []} -> ok;
         _ -> ari_crt_coordinator:report(Coordinator, self(), Delta2)
     end,
+    Worker3 = publish(exchange(Worker2)),
     Exhausted andalso gen_server:cast(self(), round),
-    publish(Worker2).
+    Worker3.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -211,6 +237,20 @@ steps(Steps, #worker{engine = Engine} = Worker, {Released, Added}) ->
         empty ->
             {Worker, {Released, Added}, false}
     end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Sends the messages the engine put in its outbox to the workers of
+%% the copies they belong to, see {@link exchange/2}.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec exchange(#worker{}) -> #worker{}.
+exchange(#worker{engine = Engine, workers = Workers} = Worker) ->
+    {Outbox, Engine2} = ari_engine:outbox(Engine),
+    maps:foreach(fun(Copy, Events) -> exchange(element(Copy, Workers), Events) end, Outbox),
+    Worker#worker{engine = Engine2}.
 
 %%--------------------------------------------------------------------
 %% @doc

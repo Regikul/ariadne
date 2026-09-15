@@ -30,7 +30,10 @@
 
 -export([
     new/1,
+    new/3,
     push/4,
+    accept/2,
+    outbox/1,
     dequeue/1,
     deliver/2,
     notify/3,
@@ -50,10 +53,16 @@
 
 -record(engine, {
     plan :: ari_plan:t(),
+    %% Which copy of the graph this engine is, out of how many.
+    index :: pos_integer(),
+    count :: pos_integer(),
     %% The state of every vertex.
     states :: #{atom() => term()},
     %% The messages waiting on the edges, in the order they were sent.
     queue :: queue:queue(event()),
+    %% The messages sent to other copies and not carried over yet,
+    %% by copy, the latest first.
+    outbox :: #{pos_integer() => [event()]},
     %% The notifications asked for and not delivered yet.
     notifications :: #{{Vertex :: atom(), ari_vtime:t()} => []},
     %% The items that left the graph along every output, the latest
@@ -65,8 +74,19 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Creates an engine of the plan `Plan': initialises every vertex,
-%% see {@link ariadne_vertex:init/1}.
+%% Creates an engine of the plan `Plan' that is the only copy of the
+%% graph, see {@link new/3}.
+%% @end
+%%--------------------------------------------------------------------
+-spec new(ari_plan:t()) -> t().
+new(Plan) ->
+    new(Plan, 1, 1).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Creates an engine of the plan `Plan' that is copy number `Index'
+%% of the graph out of `Count' copies: initialises every vertex, see
+%% {@link ariadne_vertex:init/1}.
 %%
 %% If the `init/1' of a vertex fails, the vertices initialised before
 %% it are terminated (see {@link ariadne_vertex:terminate/1}) and the
@@ -74,12 +94,15 @@
 %% `terminate/1' raised meanwhile is dropped.
 %% @end
 %%--------------------------------------------------------------------
--spec new(ari_plan:t()) -> t().
-new(Plan) ->
+-spec new(ari_plan:t(), Index :: pos_integer(), Count :: pos_integer()) -> t().
+new(Plan, Index, Count) when Index >= 1, Index =< Count ->
     #engine{
         plan = Plan,
+        index = Index,
+        count = Count,
         states = init(Plan, ari_plan:vertices(Plan), #{}),
         queue = queue:new(),
+        outbox = #{},
         notifications = #{},
         outputs = #{Output => [] || Output <- ari_plan:outputs(Plan)}
     }.
@@ -100,6 +123,31 @@ push(Edge, Messages, Time, Engine) ->
         Messages
     ),
     {Engine2, {[], lists:reverse(Added)}}.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Queues the events `Events', counted already by whoever sent them,
+%% in the order given: the items another copy of the graph put in
+%% its outbox for this one (see {@link outbox/1}), or the items of
+%% an input counted before they were handed over. The events are
+%% queued as they are, whatever copy their key names.
+%% @end
+%%--------------------------------------------------------------------
+-spec accept(Events :: [event()], t()) -> t().
+accept(Events, #engine{queue = Queue} = Engine) ->
+    Engine#engine{queue = lists:foldl(fun queue:in/2, Queue, Events)}.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Takes the messages sent to other copies of the graph since the
+%% last call, by copy, each in the order sent, and empties the
+%% outbox. The messages are counted already; the copy they go to
+%% takes them with {@link accept/2}.
+%% @end
+%%--------------------------------------------------------------------
+-spec outbox(t()) -> {#{pos_integer() => [event()]}, t()}.
+outbox(#engine{outbox = Outbox} = Engine) ->
+    {maps:map(fun(_Copy, Events) -> lists:reverse(Events) end, Outbox), Engine#engine{outbox = #{}}}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -343,7 +391,10 @@ send(Vertex, Event, Messages, #engine{plan = Plan} = Engine) ->
 %% Puts a message on an edge, adding its pointstamp in front of
 %% `Added'. An edge leading out of the graph is not waited on: the
 %% message leaves at once, with the timestamp changed by the edge,
-%% and nothing is added.
+%% and nothing is added. A message of an edge partitioned by a key
+%% is queued here if its key names this copy of the graph, and put
+%% in the outbox for the copy it names otherwise; it is counted
+%% either way.
 %%
 %% @private
 %% @end
@@ -357,8 +408,16 @@ enqueue({Edge, Message, Time} = Event, #engine{plan = Plan} = Engine, Added) ->
             {Engine#engine{outputs = maps:update_with(Edge, fun(Ms) -> [Left | Ms] end, Outputs)},
              Added};
         {_Kind, _From, _To} ->
-            #engine{queue = Queue} = Engine,
-            {Engine#engine{queue = queue:in(Event, Queue)}, [{{edge, Edge}, Time} | Added]}
+            #engine{index = Index, count = Count, queue = Queue, outbox = Outbox} = Engine,
+            Engine2 = case ari_plan:partition(Plan, Edge, Message, Count) of
+                Copy when Copy =:= undefined; Copy =:= Index ->
+                    Engine#engine{queue = queue:in(Event, Queue)};
+                Copy ->
+                    Engine#engine{
+                        outbox = maps:update_with(Copy, fun(Es) -> [Event | Es] end, [Event], Outbox)
+                    }
+            end,
+            {Engine2, [{{edge, Edge}, Time} | Added]}
     end.
 
 %%--------------------------------------------------------------------

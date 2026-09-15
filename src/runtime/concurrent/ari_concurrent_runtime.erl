@@ -30,6 +30,14 @@
 %%% them, see {@link subscribe/2}; the items of every worker come in
 %%% the order they left in, and the workers are not ordered.
 %%%
+%%% Every worker runs the whole graph, so a vertex keeping state sees
+%%% the items of its own worker only, unless the edge leading to it
+%%% is partitioned by a key (see `edge_opts()' in `ari_graph.hrl'):
+%%% the items of one key are then handed to one and the same worker,
+%%% whichever worker they came up on. An input partitioned by a key
+%%% is spread by the key rather than in turn. The order kept is that
+%%% of the items one worker hands to another.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 

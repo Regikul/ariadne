@@ -110,6 +110,59 @@ a_long_queue_is_delivered_over_several_rounds_test() ->
     stop(Sup).
 
 %%%===================================================================
+%%% The keys
+%%%===================================================================
+
+the_items_of_a_partitioned_input_go_to_the_worker_of_their_key_test() ->
+    Sup = start(keyed_input, tracing_keyed_input(), 3),
+    ok = ari_concurrent_runtime:subscribe(keyed_input, output),
+    Items = lists:seq(1, 20),
+    ok = ari_concurrent_runtime:push(keyed_input, input, 0, Items),
+    Traced = [{Item, ari_crt_worker:index(Pid)} || {{Item, Pid}, _Time} <- receive_n(20, keyed_input, output)],
+    ?assertEqual([{Item, worker_of(Item, 3)} || Item <- Items], lists:keysort(1, Traced)),
+    stop(Sup).
+
+the_items_of_a_partitioned_edge_are_handed_to_the_worker_of_their_key_test() ->
+    Sup = start(keyed_edge, tracing_keyed_edge(), 3),
+    ok = ari_concurrent_runtime:subscribe(keyed_edge, output),
+    Items = lists:seq(1, 20),
+    ok = ari_concurrent_runtime:push(keyed_edge, input, 0, Items),
+    Traced = [{Item, ari_crt_worker:index(Pid)} || {{{Item, _}, Pid}, _Time} <- receive_n(20, keyed_edge, output)],
+    ?assertEqual([{Item, worker_of(Item, 3)} || Item <- Items], lists:keysort(1, Traced)),
+    stop(Sup).
+
+the_items_handed_over_by_a_worker_keep_their_order_test() ->
+    Sup = start(handed, tracing_keyed_edge(), 3),
+    ok = ari_concurrent_runtime:subscribe(handed, output),
+    Items = lists:seq(1, 30),
+    ok = ari_concurrent_runtime:push(handed, input, 0, Items),
+    %% Every item, with the worker it came up on and the worker it
+    %% was handed to.
+    Traced = [{Sender, Receiver, Item} || {{{Item, Sender}, Receiver}, _Time} <- receive_n(30, handed, output)],
+    Pairs = lists:usort([{Sender, Receiver} || {Sender, Receiver, _Item} <- Traced]),
+    ?assert(length(Pairs) > 1),
+    lists:foreach(
+        fun({S, R}) ->
+            Handed = [Item || {Sender, Receiver, Item} <- Traced, Sender =:= S, Receiver =:= R],
+            ?assertEqual(lists:sort(Handed), Handed)
+        end,
+        Pairs
+    ),
+    stop(Sup).
+
+the_items_handed_over_are_counted_before_they_are_delivered_test() ->
+    Sup = start(handed_counted, counting_keyed_edge(), 3),
+    ok = ari_concurrent_runtime:subscribe(handed_counted, output),
+    Items = [1, 1, 1, 1, 2, 2, 3],
+    ok = ari_concurrent_runtime:push(handed_counted, input, 0, Items),
+    ok = ari_concurrent_runtime:close(handed_counted, input, 0),
+    T = ari_vtime:new(0),
+    Counts = maps:groups_from_list(fun(Item) -> worker_of(Item, 3) end, Items),
+    Expected = lists:sort([{length(Of), T} || _Worker := Of <- Counts]),
+    ?assertEqual(Expected, lists:sort(receive_n(map_size(Counts), handed_counted, output))),
+    stop(Sup).
+
+%%%===================================================================
 %%% Notifications
 %%%===================================================================
 
@@ -240,6 +293,42 @@ tracing() ->
         ari_graph:in(input, {tracer, in}),
         ari_graph:node(tracer, ari_test_tracer, []),
         ari_graph:out(output, {tracer, out})
+    ]).
+
+%% The worker, of `Count', the runtime hands an item keyed by itself
+%% to, see ari_plan:partition/4.
+worker_of(Item, Count) ->
+    erlang:phash2(Item, Count) + 1.
+
+%% Items enter at the worker of their key.
+tracing_keyed_input() ->
+    ari_graph:graph([
+        ari_graph:in(input, {tracer, in}, #{key => fun(N) -> N end}),
+        ari_graph:node(tracer, ari_test_tracer, []),
+        ari_graph:out(output, {tracer, out})
+    ]).
+
+%% Items are spread in turn and marked with the worker they came up
+%% on, then handed to the worker of their key along the link and
+%% marked again: `{{Item, Sender}, Receiver}'.
+tracing_keyed_edge() ->
+    ari_graph:graph([
+        ari_graph:in(input, {sender, in}),
+        ari_graph:node(sender, ari_test_tracer, []),
+        ari_graph:edge(link, {sender, out}, {receiver, in}, #{key => fun({N, _Pid}) -> N end}),
+        ari_graph:node(receiver, ari_test_tracer, []),
+        ari_graph:out(output, {receiver, out})
+    ]).
+
+%% Items are spread in turn, then handed to the worker of their key
+%% to be counted there.
+counting_keyed_edge() ->
+    ari_graph:graph([
+        ari_graph:in(input, {first, in}),
+        ari_graph:node(first, ari_test_pass, []),
+        ari_graph:edge(link, {first, out}, {count, in}, #{key => fun(N) -> N end}),
+        ari_graph:node(count, ari_test_count, []),
+        ari_graph:out(output, {count, done})
     ]).
 
 %% A vertex reporting its termination to `Pid'.

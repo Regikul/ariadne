@@ -51,7 +51,7 @@ init({Name, Graph, Count}) ->
     Workers = [
         #{
             id => {worker, Index},
-            start => {ari_crt_worker, start_link, [Name, Index, Plan]}
+            start => {ari_crt_worker, start_link, [Name, Index, Count, Plan]}
         }
      || Index <- lists:seq(1, Count)
     ],

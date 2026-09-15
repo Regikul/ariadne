@@ -92,12 +92,86 @@ messages_are_dequeued_in_the_order_they_were_pushed_test() ->
     {{input, b, T}, E2} = ari_engine:dequeue(E1),
     ?assertEqual(empty, ari_engine:dequeue(E2)).
 
+accepted_events_are_queued_as_they_are_test() ->
+    T = ari_vtime:new(0),
+    E0 = ari_engine:accept([{input, a, T}, {link, b, T}], engine(chain())),
+    {{input, a, T}, E1} = ari_engine:dequeue(E0),
+    {{link, b, T}, E2} = ari_engine:dequeue(E1),
+    ?assertEqual(empty, ari_engine:dequeue(E2)).
+
+%%%===================================================================
+%%% The copies
+%%%===================================================================
+
+a_message_of_a_key_of_this_copy_is_queued_test() ->
+    T = ari_vtime:new(0),
+    [Mine | _] = of_copy(1, 2),
+    {E0, _} = ari_engine:push(input, [Mine], T, ari_engine:new(ari_plan:prepare(keyed()), 1, 2)),
+    {Event, E1} = ari_engine:dequeue(E0),
+    {E2, Delta} = ari_engine:deliver(Event, E1),
+    ?assertEqual({[{{edge, input}, T}], [{{edge, link}, T}]}, Delta),
+    ?assertMatch({{link, Mine, T}, _}, ari_engine:dequeue(E2)),
+    ?assertMatch({#{}, _}, ari_engine:outbox(E2)).
+
+a_message_of_a_key_of_another_copy_goes_to_the_outbox_test() ->
+    T = ari_vtime:new(0),
+    [Theirs | _] = of_copy(1, 2),
+    {E0, _} = ari_engine:push(input, [Theirs], T, ari_engine:new(ari_plan:prepare(keyed()), 2, 2)),
+    {Event, E1} = ari_engine:dequeue(E0),
+    {E2, Delta} = ari_engine:deliver(Event, E1),
+    ?assertEqual({[{{edge, input}, T}], [{{edge, link}, T}]}, Delta),
+    ?assertEqual(empty, ari_engine:dequeue(E2)),
+    {Outbox, E3} = ari_engine:outbox(E2),
+    ?assertEqual(#{1 => [{link, Theirs, T}]}, Outbox),
+    ?assertEqual({#{}, E3}, ari_engine:outbox(E3)).
+
+the_outbox_keeps_the_order_of_the_messages_of_a_copy_test() ->
+    T = ari_vtime:new(0),
+    Theirs = of_copy(1, 2),
+    {E0, _} = ari_engine:push(input, Theirs, T, ari_engine:new(ari_plan:prepare(keyed()), 2, 2)),
+    E1 = deliver_all(E0),
+    {Outbox, _E2} = ari_engine:outbox(E1),
+    ?assertEqual(#{1 => [{link, N, T} || N <- Theirs]}, Outbox).
+
+the_only_copy_queues_every_key_test() ->
+    T = ari_vtime:new(0),
+    {E0, _} = ari_engine:push(input, [1, 2], T, engine(keyed())),
+    E1 = deliver_all(E0),
+    ?assertMatch({#{}, _}, ari_engine:outbox(E1)),
+    ?assertMatch([{1, T}, {2, T}], element(1, ari_engine:pull(output, E1))).
+
 %%%===================================================================
 %%% Helpers
 %%%===================================================================
 
 engine(Graph) ->
     ari_engine:new(ari_plan:prepare(Graph)).
+
+%% Delivers every message of the queue.
+deliver_all(Engine) ->
+    case ari_engine:dequeue(Engine) of
+        {Event, Engine2} ->
+            {Engine3, _Delta} = ari_engine:deliver(Event, Engine2),
+            deliver_all(Engine3);
+        empty ->
+            Engine
+    end.
+
+%% Some numbers, keyed by themselves, that belong to copy `Copy' of
+%% `Count', see ari_plan:partition/4.
+of_copy(Copy, Count) ->
+    [N || N <- lists:seq(1, 20), erlang:phash2(N, Count) + 1 =:= Copy].
+
+%% The chain with its link partitioned by the message, a number
+%% keyed by itself.
+keyed() ->
+    ari_graph:graph([
+        ari_graph:in(input, {first, in}),
+        ari_graph:node(first, ari_test_pass, []),
+        ari_graph:edge(link, {first, out}, {second, in}, #{key => fun(N) -> N end}),
+        ari_graph:node(second, ari_test_pass, []),
+        ari_graph:out(output, {second, out})
+    ]).
 
 %% An input passed straight to an output.
 passing() ->
