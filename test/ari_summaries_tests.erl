@@ -50,6 +50,12 @@ a_vertex_reaches_itself_around_the_loop_test() ->
     ?assert(reaches(Table, {vertex, prepare}, vtime(1, [2]), is_done, vtime(1, [2]))),
     ?assertNot(reaches(Table, {vertex, is_done}, vtime(1, [2]), prepare, vtime(1, [2]))).
 
+a_vertex_returns_to_itself_around_the_loop_alone_test() ->
+    Table = example(),
+    ?assert(ari_summaries:returns(Table, {vertex, is_done}, vtime(1, [2]), vtime(1, [3]))),
+    ?assertNot(ari_summaries:returns(Table, {vertex, is_done}, vtime(1, [2]), vtime(1, [2]))),
+    ?assertNot(ari_summaries:returns(Table, {vertex, filter}, vtime(1, []), vtime(2, []))).
+
 a_cycle_without_a_feedback_is_refused_test() ->
     Graph = ari_graph:graph([
         ari_graph:node(a, a_callback, []),

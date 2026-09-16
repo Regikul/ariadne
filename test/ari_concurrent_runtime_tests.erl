@@ -143,6 +143,23 @@ a_worker_takes_in_what_came_while_it_was_busy_as_one_round_test() ->
     ?assertEqual(1, length(receive_reports(Coordinator))),
     stop(Sup).
 
+a_worker_closes_a_round_that_ran_out_of_steps_whatever_is_waiting_test() ->
+    %% Every item takes two steps through the chain; the pushes
+    %% waiting make 3000 steps, three rounds of a thousand.
+    Sup = start(rounds, chain(), 1),
+    ok = ari_concurrent_runtime:subscribe(rounds, output),
+    [Worker] = pg:get_local_members(rounds, workers),
+    [Coordinator] = pg:get_local_members(rounds, coordinator),
+    ok = sys:suspend(Worker),
+    Items = lists:seq(1, 1500),
+    [ok = ari_concurrent_runtime:push(rounds, input, 0, Batch) || Batch <- batches(Items, 100)],
+    1 = erlang:trace(Coordinator, true, ['receive']),
+    ok = sys:resume(Worker),
+    T = ari_vtime:new(0),
+    ?assertEqual([{Item, T} || Item <- Items], receive_n(1500, rounds, output)),
+    ?assertEqual(3, length(receive_reports(Coordinator))),
+    stop(Sup).
+
 %%%===================================================================
 %%% The limit
 %%%===================================================================
@@ -381,6 +398,13 @@ receive_all(Tag) ->
 
 %% The reports of the workers the coordinator `Coordinator' received
 %% so far, as traced.
+%% The list cut into batches of `Size'.
+batches([], _Size) ->
+    [];
+batches(Items, Size) ->
+    {Batch, Rest} = lists:split(min(Size, length(Items)), Items),
+    [Batch | batches(Rest, Size)].
+
 receive_reports(Coordinator) ->
     receive
         {trace, Coordinator, 'receive', {'$gen_cast', {delta, _Worker, _Sum}} = Report} ->

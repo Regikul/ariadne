@@ -27,7 +27,9 @@
 %%% item back to a time that was complete, and no time would ever be
 %%% complete for the places on it.
 %%%
-%%% {@link reaches/5} answers the question of the runtime.
+%%% {@link reaches/5} answers the question of the runtime; {@link
+%%% returns/4} answers it for the notifications a vertex itself has
+%%% pending, which reach its later times around a cycle alone.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -38,7 +40,8 @@
 
 -export([
     build/1,
-    reaches/5
+    reaches/5,
+    returns/4
 ]).
 
 -export_type([
@@ -85,9 +88,9 @@ build(#graph{edges = Edges}) ->
 %% at a time preceding it.
 %%
 %% A place reaches itself by the empty path: an item at `To' of a
-%% time that precedes or equals `Time2' reaches `Time2'. The runtime
-%% asking about a pointstamp of `To' itself has to leave that
-%% pointstamp out of the question.
+%% time that precedes or equals `Time2' reaches `Time2'. For the
+%% pointstamps of `To' itself the runtime asks {@link returns/4}
+%% instead.
 %% @end
 %%--------------------------------------------------------------------
 -spec reaches(
@@ -104,6 +107,27 @@ reaches(Table, From, Time, To, Time2) ->
             ari_vtime:le(ari_summary:advance(Summary, Time), Time2)
         end,
         Paths
+    ).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Tells whether an item of time `Time' at the vertex `Vertex' can
+%% result in an item arriving back at the vertex at time `Time2' or
+%% at a time preceding it: by a cycle, the empty path left out. The
+%% notifications a vertex has pending are asked about this way,
+%% since a notification sends its messages down the edges leaving
+%% the vertex, and a later notification of the vertex is delivered
+%% after it whatever the answer.
+%% @end
+%%--------------------------------------------------------------------
+-spec returns(Table :: t(), Vertex :: location(), Time :: ari_vtime:t(), Time2 :: ari_vtime:t()) ->
+    boolean().
+returns(Table, Vertex, Time, Time2) ->
+    lists:any(
+        fun(Summary) ->
+            ari_vtime:le(ari_summary:advance(Summary, Time), Time2)
+        end,
+        maps:get({Vertex, Vertex}, Table, [])
     ).
 
 %%%===================================================================

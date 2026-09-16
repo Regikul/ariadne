@@ -142,6 +142,18 @@ a_notification_upstream_keeps_a_time_from_completing_test() ->
     P1 = ari_progress:apply({[], [{{vertex, first}, T}]}, P0),
     ?assertNot(ari_progress:complete(summaries(), {second, T}, P1)).
 
+an_earlier_notification_of_the_vertex_itself_does_not_keep_a_later_time_from_completing_test() ->
+    {ok, P0} = ari_progress:close(input, 1, ari_progress:new([input])),
+    P1 = ari_progress:apply({[], [{{vertex, second}, ari_vtime:new(0)}]}, P0),
+    ?assert(ari_progress:complete(summaries(), {second, ari_vtime:new(1)}, P1)).
+
+an_earlier_notification_of_the_vertex_itself_keeps_a_later_time_it_comes_back_at_test() ->
+    Earlier = ari_vtime:feedback(ari_vtime:ingress(ari_vtime:new(0))),
+    {ok, P0} = ari_progress:close(input, 0, ari_progress:new([input])),
+    P1 = ari_progress:apply({[], [{{vertex, inc}, Earlier}]}, P0),
+    ?assert(ari_progress:complete(looping(), {inc, Earlier}, P1)),
+    ?assertNot(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Earlier)}, P1)).
+
 %%%===================================================================
 %%% The frontier
 %%%===================================================================

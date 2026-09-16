@@ -37,7 +37,12 @@
 %%% worker, see {@link ari_asked}. Whenever the progress changes -- a
 %%% delta is applied or an epoch is closed -- the coordinator tells
 %%% the workers to deliver the notifications whose time is complete,
-%%% the earliest times first.
+%%% the earliest times first. A notification of a vertex pending
+%%% does not hold a later one of the vertex back (see {@link
+%%% ari_progress:complete/3}): the two go out together, and the
+%%% worker delivers them in the order told. Were the later one to
+%%% wait for the report of the earlier, a vertex would get one
+%%% notification per round.
 %%%
 %%% The coordinator is the last process of the branch to start. Once
 %%% up, it finds the workers in the group `workers' of the scope of

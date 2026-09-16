@@ -87,7 +87,9 @@
     coordinator :: pid() | undefined,
     workers :: tuple() | undefined,
     %% The sum of the deltas of the round open, not reported yet.
-    sum = #{} :: ari_progress:sum()
+    sum = #{} :: ari_progress:sum(),
+    %% The steps the round open may still take.
+    left = ?ROUND :: non_neg_integer()
 }).
 
 %%--------------------------------------------------------------------
@@ -220,11 +222,11 @@ take(round, Worker) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Goes on with the round: delivers up to `ROUND' messages of the
-%% queue. If the steps run out, closes the round and asks for
-%% another one; if the queue runs empty, returns to the server loop
-%% with a timeout of zero, to take in whatever is in the mailbox and
-%% close the round once nothing is.
+%% Goes on with the round: delivers the messages of the queue for
+%% the steps the round has left. If the steps run out, closes the
+%% round and asks for another one; if the queue runs empty, returns
+%% to the server loop with a timeout of zero, to take in whatever is
+%% in the mailbox and close the round once nothing is.
 %%
 %% Every callback returns with the timeout, whether or not a round
 %% is open: closing a round with nothing in it costs nothing.
@@ -233,14 +235,14 @@ take(round, Worker) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec go(#worker{}) -> {noreply, #worker{}} | {noreply, #worker{}, 0}.
-go(Worker) ->
-    case steps(?ROUND, Worker) of
-        {Worker2, true} ->
+go(#worker{left = Left} = Worker) ->
+    case steps(Left, Worker) of
+        {Worker2, 0} ->
             Worker3 = close(Worker2),
             gen_server:cast(self(), round),
             {noreply, Worker3};
-        {Worker2, false} ->
-            {noreply, Worker2, 0}
+        {Worker2, Left2} ->
+            {noreply, Worker2#worker{left = Left2}, 0}
     end.
 
 %%--------------------------------------------------------------------
@@ -260,27 +262,27 @@ go(Worker) ->
 -spec close(#worker{}) -> #worker{}.
 close(#worker{coordinator = Coordinator, sum = Sum} = Worker) ->
     map_size(Sum) =:= 0 orelse ari_crt_coordinator:report(Coordinator, self(), Sum),
-    publish(exchange(Worker#worker{sum = #{}})).
+    publish(exchange(Worker#worker{sum = #{}, left = ?ROUND})).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Delivers up to `Steps' messages of the queue, adding their deltas
-%% to the sum of the round, until the queue is empty. Tells whether
-%% the steps ran out before the queue did.
+%% to the sum of the round, until the queue is empty. Returns the
+%% steps left: none if they ran out before the queue did.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec steps(Steps :: non_neg_integer(), #worker{}) -> {#worker{}, Exhausted :: boolean()}.
+-spec steps(Steps :: non_neg_integer(), #worker{}) -> {#worker{}, Left :: non_neg_integer()}.
 steps(0, Worker) ->
-    {Worker, true};
+    {Worker, 0};
 steps(Steps, #worker{engine = Engine, sum = Sum} = Worker) ->
     case ari_engine:dequeue(Engine) of
         {Event, Engine2} ->
             {Engine3, Delta} = ari_engine:deliver(Event, Engine2),
             steps(Steps - 1, Worker#worker{engine = Engine3, sum = ari_progress:sum(Delta, Sum)});
         empty ->
-            {Worker, false}
+            {Worker, Steps}
     end.
 
 %%--------------------------------------------------------------------

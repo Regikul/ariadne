@@ -197,32 +197,38 @@ in_flight(#progress{in_flight = InFlight}) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Tells whether the time `Time' is complete for the vertex `Vertex':
-%% whether nothing outstanding, the notification of the vertex at
-%% that very time aside, can result in a message of `Time' or of an
-%% earlier time arriving at the vertex, see {@link
+%% whether nothing outstanding can result in a message of `Time' or
+%% of an earlier time arriving at the vertex, see {@link
 %% ari_summaries:reaches/5}. An open input is outstanding at its
 %% first open epoch; the later ones reach no further.
 %%
-%% Only the frontiers are asked. A time a frontier time precedes
-%% reaches no further than the frontier time does. The notification
-%% left aside is either on the frontier of the vertex, and then no
-%% other outstanding time of the vertex precedes `Time', and none
-%% that follows it or is incomparable with it comes back at `Time'
-%% or earlier, since no path leads to an earlier time; or it is not,
-%% and then a frontier time of the vertex precedes `Time' and keeps
-%% it from completing.
+%% The notifications the vertex itself has pending count by the
+%% cycles alone, see {@link ari_summaries:returns/4}: a notification
+%% sends its messages down the edges leaving the vertex, so an
+%% earlier notification of the vertex pending keeps `Time' from
+%% completing only if a cycle brings its messages back by `Time'.
+%% The order of the notifications of a vertex is kept by whoever
+%% delivers them, which takes the earliest complete first; a vertex
+%% asks for a notification from a message, at the time of the
+%% message or a later one, and no message of a time that is complete
+%% is left to be delivered.
+%%
+%% Only the frontiers are asked: a time a frontier time precedes
+%% reaches no further than the frontier time does.
 %% @end
 %%--------------------------------------------------------------------
 -spec complete(ari_summaries:t(), {Vertex :: atom(), ari_vtime:t()}, t()) -> boolean().
 complete(Summaries, {Vertex, Time}, #progress{frontier = Frontier, inputs = Inputs}) ->
-    Self = {{vertex, Vertex}, Time},
+    Own = {vertex, Vertex},
     Outstanding =
-        [{Location, Earliest} ||
-            Location := Frontline <- Frontier, Earliest <- Frontline, {Location, Earliest} =/= Self] ++
+        [{Location, Earliest} || Location := Frontline <- Frontier, Earliest <- Frontline] ++
         [{{edge, Input}, ari_vtime:new(Open)} || Input := Open <- Inputs],
     not lists:any(
-        fun({Location, From}) ->
-            ari_summaries:reaches(Summaries, Location, From, {vertex, Vertex}, Time)
+        fun
+            ({Location, From}) when Location =:= Own ->
+                ari_summaries:returns(Summaries, Own, From, Time);
+            ({Location, From}) ->
+                ari_summaries:reaches(Summaries, Location, From, Own, Time)
         end,
         Outstanding
     ).

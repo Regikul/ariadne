@@ -598,3 +598,75 @@ ms, `epochs {1000,100}` 88, `pipeline {4,100000}` 191). The
 concurrent rows are unchanged as well: `{10,10,E}` at 0.75, 0.80,
 0.87 µs/step, `{1000,1,E}` at 0.78, 0.90 and 1.2–1.5 with a wide
 spread from 1000 epochs on, coordinator share 0.6 %.
+
+## After 6: the notifications of a vertex go out together
+
+The check of the memory over a long run: `stream` at 1 000 to
+100 000 epochs on one worker, with the coordinator and the worker
+collected and measured after every run. After a run the two hold 3
+KB each whatever the epochs -- nothing is kept -- but the peaks grew
+with the epochs, and so did the live data of the coordinator in the
+middle of a run:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+stream    {1000,100,1000}      1    101000     102.7    97.7..106.5    1.02    97.9   11.7       1      672     1088   1.2
+stream    {10000,100,1000}     1   1010000     979.6  963.9..1218.4    0.97   942.0   11.9       2     7457     9345   1.1
+stream    {30000,100,1000}     1   3030000    3338.7 3219.1..3403.4    1.10  3205.8   11.9       2    10907    21918   1.1
+stream    {100000,100,1000}    1  10100000   11848.4 11737.2..12741    1.17 11348.8   12.0       2    46803    69271   1.0
+```
+
+Sampling the coordinator through the run of 10 000 epochs: with the
+producer at epoch 5 668, 4 933 notifications were asked for and not
+sent, from epoch 735 on; the frontier of the counting vertex held
+its notification of epoch 338, sent and not reported delivered. Two
+things in the runtime made the lag, and it grew without bound as
+long as the producer went on.
+
+The first: a worker's round was closed by the timeout of the server
+loop alone. The budget of a thousand steps was that of one call to
+go on with the round, and a feed of a hundred items runs the queue
+empty within it; with the mailbox never empty under a steady
+producer the round closed only once the producer stalled on the
+limit, or never, with no limit. Now the budget is the round's, kept
+across the calls, and a round closes on the earlier of the two: the
+steps running out or the mailbox running empty.
+
+The second: an earlier notification of a vertex, sent and not
+reported delivered, kept the later ones of the vertex from
+completing by the empty path a place reaches itself by. So the
+coordinator sent one notification of a vertex per report, and a
+report comes once a round; at ten epochs a round the lag grew by
+nine. Now the notifications a vertex itself has pending count by the
+cycles alone (`ari_summaries:returns/4`): a notification sends its
+messages down the edges leaving the vertex, and the order of the
+notifications of a vertex is kept by the worker, which is told them
+earliest first and delivers them in the order told. A vertex asks
+for a notification from a message at the time of the message or
+later, and no message of a complete time is left to be delivered, so
+none can be asked for behind a notification already sent. The
+runtime of one process is untouched: it took the earliest complete
+notification first already.
+
+After, the same rows and four workers:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+stream    {1000,100,1000}      1    101000      75.7     73.4..90.2    0.75    75.4    9.5       1      224      138   1.2
+stream    {10000,100,1000}     1   1010000     742.3   718.3..783.2    0.73   742.1    9.5       1      309      138   1.2
+stream    {30000,100,1000}     1   3030000    2223.8 2190.9..2828.2    0.73  2223.3    9.5       1      309      138   1.2
+stream    {100000,100,1000}    1  10100000    7550.2 7286.6..8481.9    0.75  7549.8    9.5       1      309      138   1.2
+stream    {1000,100,1000}      4    104000      49.3     46.7..52.1    0.47    48.7   15.4       3      138      191   3.3
+stream    {10000,100,1000}     4   1040000     463.3   455.8..475.4    0.45   463.0   15.3      12      191      277   3.3
+stream    {30000,100,1000}     4   3120000    1382.2 1332.1..1506.0    0.44  1382.0   15.1      13      191      309   3.2
+```
+
+The peaks stay at 309 and 138 KB from 1 000 to 100 000 epochs,
+against 47 and 69 MB before; the coordinator sampled through the
+run holds no notification asked for and not sent. The step fell from
+1.0 to 0.75 µs on one worker and from 0.56 to 0.47 on four: the
+notifications no longer trail the items. The other shapes are
+unchanged: on one worker `pipeline {4,100000}` 205 ms, `exchange`
+219, `epochs {1000,100}` 86, `loop {1000,100}` 53; on eight
+`pipeline` 52, `exchange` 65, `epochs` 51, `loop` 24, and on
+sixteen `pipeline` 44, `exchange` 70.
