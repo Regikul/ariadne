@@ -50,6 +50,7 @@
 %%% process of the worker; the vertices are terminated when the
 %%% worker stops.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

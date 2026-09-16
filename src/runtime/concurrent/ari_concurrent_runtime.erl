@@ -2,14 +2,11 @@
 %%% @doc
 %%% Runtime of a dataflow graph in several processes.
 %%%
-%%% The runtime is a branch of a supervision tree (see {@link
-%%% ari_concurrent_sup}): a number of workers, each running a copy of
-%%% the graph (see {@link ari_crt_worker}), a coordinator keeping the
-%%% progress of the graph as a whole (see {@link ari_crt_coordinator}),
-%%% and a `pg' scope of its own the processes find each other in.
-%%% The branch is embedded into the supervision tree of the
-%%% application using it, see {@link child_spec/3}, and is known by
-%%% the name of its scope: every call of this module takes the name.
+%%% The runtime is a branch in the application's supervision tree, see
+%%% {@link child_spec/3}. Workers run copies of the graph, a coordinator
+%%% tracks their combined progress, and a local `pg' scope connects the
+%%% processes. The scope name identifies the runtime on its node and is
+%%% the first argument of every operation.
 %%%
 %%% ```
 %%% %% in the supervisor of the application:
@@ -22,48 +19,35 @@
 %%% receive {ariadne, counting, done, Message, Time} -> ... end.
 %%% '''
 %%%
-%%% The inputs are fed as in {@link ari_single_runtime}: items enter
-%%% in epochs, and an epoch is closed once no more items of it are to
-%%% come. The items of an input are spread over the workers, so the
-%%% order they were pushed in is kept by every worker on its own. The
+%%% Inputs use the epochs described by {@link ari_single_runtime}.
+%%% Items are distributed among workers. Each worker preserves the
+%%% order of the items it receives. The
 %%% outputs are delivered as messages to the processes subscribed to
-%%% them, see {@link subscribe/2}; the items of every worker come in
-%%% the order they left in, and the workers are not ordered.
+%%% them, see {@link subscribe/2}. Each worker's output is ordered;
+%%% output from different workers has no global order.
 %%%
-%%% Every worker runs the whole graph, so a vertex keeping state sees
-%%% the items of its own worker only, unless the edge leading to it
-%%% is partitioned by a key (see `edge_opts()' in `ari_graph.hrl'):
-%%% the items of one key are then handed to one and the same worker,
-%%% whichever worker they came up on. An input partitioned by a key
-%%% is spread by the key rather than in turn. The order kept is that
-%%% of the items one worker hands to another.
+%%% Every worker runs a full copy of the graph, so vertex state belongs
+%%% to that copy. A `key' option on an input or edge routes equal keys
+%%% to the same worker, see {@link ari_graph:in/3} and {@link
+%%% ari_graph:edge/4}. An
+%%% unpartitioned input distributes items among workers in turn.
 %%%
-%%% The items pushed are queued inside the runtime until delivered,
-%%% and so are the messages the vertices send; the runtime never
-%%% drops one. The queues are bounded by the option `max_in_flight':
-%%% as long as as many messages as the limit or more are on their
-%%% way -- pushed or sent and not delivered yet -- a push waits, and
-%%% goes on once enough of them are delivered. A push is never split,
-%%% so the messages on their way come short of the limit plus one
-%%% push. Notifications are not counted: their times complete only
-%%% once the producer closes the epochs, and a producer waiting in a
-%%% push cannot. Closing waits for nothing.
+%%% The runtime queues pushed items and messages produced by vertices
+%%% until delivery. `max_in_flight' applies backpressure to pushes: a
+%%% push waits while the current number of outstanding messages is at
+%%% or above the limit. The runtime admits a push as one batch, so a
+%%% batch of `N' items may raise the count to `max_in_flight - 1 + N'.
+%%% Notification requests do not count toward this limit. {@link
+%%% close/3} returns without waiting for capacity.
 %%%
-%%% The limit bounds what enters from the outside. What one item
-%%% turns into inside the graph -- the messages a vertex sends, the
-%%% iterations of a loop -- is the working set of the graph and is
-%%% bounded by the graph alone: a loop that does not converge or a
-%%% vertex sending without measure grows the queues whatever the
-%%% limit, and a vertex keeping every item grows its state. Against
-%%% such a graph the runtime has a fuse, the option `max_heap_size':
-%%% it is set on the processes of the workers, see the process flag
-%%% of the same name, and once a worker outgrows it the worker is
-%%% killed and the branch stops, for the supervisor above to decide
-%%% about. The pushes waiting exit with the call. The coordinator
-%%% needs no fuse: it keeps counts, not messages, and whatever grows
-%%% in it grows in the workers first. Neither does the runtime look after the mailboxes of
-%%% the subscribers: a subscriber slower than the graph piles up its
-%%% items like any process does.
+%%% `max_in_flight' controls external input; it does not bound messages
+%%% produced inside the graph, loop iterations, vertex state, or
+%%% subscriber mailboxes. `max_heap_size' sets the process flag of the
+%%% same name on every worker. A worker that exceeds this limit is
+%%% killed, the runtime branch stops, and its parent supervisor applies
+%%% its restart strategy. Calls waiting in {@link push/4} exit when the
+%%% branch stops. Subscribers are responsible for consuming output
+%%% quickly enough to control their mailbox growth.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -83,14 +67,9 @@
     opts/0
 ]).
 
-%% The options of a runtime: how many workers run the graph, how
-%% many messages may be on their way inside the runtime before a
-%% push waits, `infinity' by default, and the most heap a worker
-%% may grow to, as the process flag `max_heap_size' takes it, none
-%% by default. The heap holds the garbage not collected yet along
-%% with the state, and every push is copied into the worker, so the
-%% limit is to leave room for a few pushes on top of what the graph
-%% keeps.
+%% Runtime options. `workers' is required. `max_in_flight' defaults to
+%% `infinity'. `max_heap_size' is passed to the process flag of the
+%% same name and is unset by default.
 -type opts() :: #{
     workers := pos_integer(),
     max_in_flight => pos_integer() | infinity,
@@ -99,13 +78,12 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The child specification of a runtime of the graph `Graph' named
-%% `Name' with the options `Opts', to be put under a supervisor of
-%% the application. The name is the name of the `pg' scope of the
-%% runtime, so one name serves one runtime on a node. The graph is
-%% prepared when the branch starts, see {@link ari_plan:prepare/1},
-%% whose errors the start fails with, as it does with options that
-%% are not what {@link opts()} says.
+%% Returns the child specification for a runtime named `Name' running
+%% `Graph' with `Opts'. Add the specification to an application
+%% supervisor. One name identifies one runtime on a node.
+%%
+%% The branch validates the graph and options when it starts. Startup
+%% returns the validation error if either is invalid.
 %% @end
 %%--------------------------------------------------------------------
 -spec child_spec(Name :: atom(), Graph :: #graph{}, opts()) -> supervisor:child_spec().
@@ -126,8 +104,10 @@ child_spec(Name, Graph, Opts) ->
 %% messages on their way are at the limit, see `max_in_flight' in
 %% {@link opts()}. The pushes waiting are taken in the order made.
 %%
-%% Refuses with `{unknown_input, Input}' if the graph has no such
-%% input and with `{closed, {Input, Epoch}}' if the epoch was closed.
+%% Returns `{error, {unknown_input, Input}}' if the graph has no such
+%% input. Returns `{error, {closed, {Input, Epoch}}}' if the epoch is
+%% closed. Exits with `{not_running, Name}' if the runtime is not
+%% running.
 %% @end
 %%--------------------------------------------------------------------
 -spec push(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]) ->
@@ -142,8 +122,9 @@ push(Name, Input, Epoch, Messages) ->
 %% and the times they contribute to may complete. Closing an epoch
 %% that is closed already changes nothing.
 %%
-%% Refuses with `{unknown_input, Input}' if the graph has no such
-%% input.
+%% Returns `{error, {unknown_input, Input}}' if the graph has no such
+%% input. Exits with `{not_running, Name}' if the runtime is not
+%% running.
 %% @end
 %%--------------------------------------------------------------------
 -spec close(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer()) ->
@@ -158,10 +139,9 @@ close(Name, Input, Epoch) ->
 %% is sent to it as `{ariadne, Name, Output, Message, Time}'. Items
 %% of an output nobody is subscribed to are dropped.
 %%
-%% A subscriber to an output of many items is to keep its mailbox
-%% off its heap (see the process flag `message_queue_data'): a
-%% process a few thousand messages behind copies them all at every
-%% collection of its heap and falls further behind.
+%% For a high-volume output, the subscriber can set the process flag
+%% `message_queue_data' to `off_heap' to reduce garbage-collection
+%% costs while its mailbox contains messages.
 %% @end
 %%--------------------------------------------------------------------
 -spec subscribe(Name :: atom(), Output :: atom()) -> ok.

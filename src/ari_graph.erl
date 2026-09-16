@@ -11,14 +11,12 @@
 %%% list of the enclosing graph as a single item, so that scopes nest.
 %%%
 %%% {@link graph/1} unfolds the scopes and sorts the items into
-%%% vertices and edges. Unfolding looks at the ends of every edge: an
+%%% vertices and edges. The endpoints determine each edge's scope: an
 %%% edge leading into a deeper scope becomes an ingress edge, an edge
 %%% leading out of one becomes an egress edge, and an edge whose ends
-%%% live in one and the same scope is left as it is. The place the
-%%% edge is written at therefore does not matter, only its ends do.
-%%% The back edge of a loop is the one exception: it is marked by hand
-%%% with {@link feedback/3}, since the choice of the edge to close the
-%%% loop on does not follow from the shape of the graph alone.
+%%% share a scope remains a plain edge. The graph description may place
+%%% an edge anywhere in its item list. A loop's back edge is declared
+%%% explicitly with {@link feedback/3}.
 %%%
 %%% The three kinds of boundary edge are the places where the
 %%% timestamp of an item changes, see {@link ari_vtime:ingress/1},
@@ -27,9 +25,9 @@
 %%% vertex the name of the scope it sits in, so that a coordinate of a
 %%% timestamp can be told from the loop it counts.
 %%%
-%%% An edge of any kind may carry options, see `edge_opts()' in
-%%% `ari_graph.hrl'. The one option there is, `key', partitions the
-%%% items of the edge: a runtime running several copies of the graph
+%%% An edge of any kind may carry a `key' option, see {@link edge/4}
+%%% and {@link in/3}. It partitions the items of the edge: a runtime
+%%% running several copies of the graph
 %%% delivers the items of one key to one and the same copy of the
 %%% vertex the edge leads to, so that a vertex keeping state by key
 %%% sees every item of the key. The kind of an edge is about the
@@ -56,6 +54,7 @@
 %%%     ari_graph:out(done, {finalize, out})
 %%% ])'''
 %%%
+%%% @headerfile "ari_graph.hrl"
 %%% @end
 %%%-------------------------------------------------------------------
 -module(ari_graph).
@@ -89,10 +88,10 @@
 %% the scope it sits in and turns the edges crossing the border of a
 %% scope into ingress and egress edges.
 %%
-%% Items referring to names of vertices the description does not
-%% define are left as they are.
+%% This function builds an unchecked description. Runtime creation
+%% reports references to unknown vertices or slots.
 %%
-%% Fails with `{duplicate_scope, Name}' if two scopes of the
+%% Raises `error({duplicate_scope, Name})' if two scopes of the
 %% description share a name: a vertex is marked with the name of its
 %% scope alone, so two scopes of one name would be taken for one.
 %% @end
@@ -124,7 +123,10 @@ in(Name, To) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Builds an edge bringing the items of the outside world into the
-%% slot `To' of a vertex, with the options `Opts'.
+%% slot `To' of a vertex, with the options `Opts'. `Opts' may contain
+%% `key', a function that returns the partition key of a message. A
+%% concurrent runtime routes messages with equal keys to the same
+%% worker.
 %% @end
 %%--------------------------------------------------------------------
 -spec in(Name :: name(), To :: endpoint(), Opts :: edge_opts()) -> edge().
@@ -165,6 +167,9 @@ edge(Name, From, To) ->
 %% Builds an edge from the slot `From' of one vertex to the slot `To'
 %% of another, with the options `Opts'. The options are kept whether
 %% the edge stays a plain edge or becomes a boundary of a scope.
+%% `Opts' may contain `key', a function that returns the partition key
+%% of a message. A concurrent runtime routes messages with equal keys
+%% to the same worker.
 %% @end
 %%--------------------------------------------------------------------
 -spec edge(Name :: name(), From :: endpoint(), To :: endpoint(), Opts :: edge_opts()) -> edge().

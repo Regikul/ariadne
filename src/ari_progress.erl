@@ -26,6 +26,7 @@
 %%% building is that of the number of groups -- the counters the
 %%% work is spread over -- not of the number of epochs open.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

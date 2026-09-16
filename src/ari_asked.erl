@@ -19,6 +19,7 @@
 %%% Whether a time is complete is told by a function given, see
 %%% {@link ari_progress:complete/3}.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

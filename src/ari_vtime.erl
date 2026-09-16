@@ -76,7 +76,7 @@ ingress({Epoch, Iterations}) ->
 %% of the innermost loop is dropped: outside of the loop it is no
 %% longer possible to tell on which iteration the item was produced.
 %%
-%% Fails with `function_clause' if the item is not inside of a loop.
+%% Raises a `function_clause' error if the item is outside every loop.
 %%
 %% @see ingress/1
 %% @end
@@ -91,7 +91,7 @@ egress({Epoch, [_ | Iterations]}) ->
 %% innermost loop. Its counter is incremented, the counters of the
 %% enclosing loops are kept as they are.
 %%
-%% Fails with `function_clause' if the item is not inside of a loop.
+%% Raises a `function_clause' error if the item is outside every loop.
 %% @end
 %%--------------------------------------------------------------------
 -spec feedback(t()) -> t().

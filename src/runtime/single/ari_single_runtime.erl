@@ -2,11 +2,10 @@
 %%% @doc
 %%% Runtime of a dataflow graph in a single process.
 %%%
-%%% The runtime is a value: an engine running the graph (see {@link
-%%% ari_engine}) and the progress of the graph (see {@link
-%%% ari_progress}), and every operation returns a new runtime.
-%%% Nothing runs on its own: the caller feeds the inputs, asks for
-%%% steps and reads the outputs.
+%%% The runtime is an immutable value containing vertex states, queued
+%%% events and graph progress. Every operation returns a new runtime.
+%%% The caller feeds inputs, advances execution with {@link step/1} or
+%%% {@link run/1}, and reads outputs with {@link pull/2}.
 %%%
 %%% ```
 %%% R0 = ari_single_runtime:new(Graph),
@@ -27,12 +26,9 @@
 %%%
 %%% A step of the runtime is one event: the delivery of a message to
 %%% the vertex at the end of its edge, or the delivery of a
-%%% notification whose time is complete, see {@link
-%%% ari_progress:complete/3}. Messages are delivered before
-%%% notifications: delivering a message costs one call, whereas
-%%% telling whether a time is complete costs a walk over everything
-%%% outstanding, and the fewer times it is done the better. The
-%%% choice is made by `next/1' alone.
+%%% notification whose time is complete. The runtime delivers queued
+%%% messages before checking notifications. This order batches the
+%%% more expensive completion checks after the queued work.
 %%%
 %%% @end
 %%%-------------------------------------------------------------------
@@ -65,11 +61,10 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Creates a runtime of the graph `Graph': prepares the plan of the
-%% graph (see {@link ari_plan:prepare/1}, whose errors the call fails
-%% with), initialises every vertex (see {@link ari_engine:new/1},
-%% whose errors the call fails with too) and opens every input at
-%% epoch 0.
+%% Creates a runtime for `Graph'. The call prepares and validates the
+%% graph, initializes every vertex, and opens every input at epoch 0.
+%% It raises graph-validation errors and callback errors from {@link
+%% ariadne_vertex:init/1}.
 %% @end
 %%--------------------------------------------------------------------
 -spec new(Graph :: #graph{}) -> t().
@@ -84,11 +79,11 @@ new(Graph) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Puts the items `Messages' of epoch `Epoch' on the input `Input',
-%% see {@link ari_plan:inputs/1}. They are delivered in the order
-%% given, by the steps to come.
+%% `Input'. They are delivered in the order given by later steps.
 %%
-%% Fails with `{unknown_input, Input}' if the plan has no such input
-%% and with `{closed, {Input, Epoch}}' if the epoch was closed.
+%% Raises `error({unknown_input, Input})' if the graph has no such
+%% input. Raises `error({closed, {Input, Epoch}})' if the epoch is
+%% closed.
 %% @end
 %%--------------------------------------------------------------------
 -spec push(Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()], t()) -> t().
@@ -105,7 +100,8 @@ push(Input, Epoch, Messages, #runtime{engine = Engine, progress = Progress} = Ru
 %% may complete. Closing an epoch that is closed already changes
 %% nothing.
 %%
-%% Fails with `{unknown_input, Input}' if the plan has no such input.
+%% Raises `error({unknown_input, Input})' if the graph has no such
+%% input.
 %% @end
 %%--------------------------------------------------------------------
 -spec close(Input :: atom(), Epoch :: non_neg_integer(), t()) -> t().
@@ -121,8 +117,8 @@ close(Input, Epoch, #runtime{progress = Progress} = Runtime) ->
 %% none, a notification whose time is complete. Returns `idle' if
 %% there is nothing to deliver.
 %%
-%% What the vertex returns is checked, and the call fails if the
-%% vertex misbehaves, see {@link ari_engine:deliver/2}.
+%% The call validates callback results and raises an error for an
+%% invalid result.
 %% @end
 %%--------------------------------------------------------------------
 -spec step(t()) -> {ok, t()} | idle.
@@ -150,11 +146,10 @@ run(Runtime) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Takes the items that left the graph along the output `Output' (see
-%% {@link ari_plan:outputs/1}) since the last call, each with the
-%% timestamp it left with, in the order they left in.
+%% Takes the items that left the graph along `Output' since the last
+%% call, each with its timestamp and in output order.
 %%
-%% Fails with `{unknown_output, Output}' if the plan has no such
+%% Raises `error({unknown_output, Output})' if the graph has no such
 %% output.
 %% @end
 %%--------------------------------------------------------------------
@@ -165,8 +160,8 @@ pull(Output, #runtime{engine = Engine} = Runtime) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Shuts the runtime down: terminates every vertex, see {@link
-%% ari_engine:stop/1}. Whatever was outstanding is dropped.
+%% Shuts the runtime down and terminates every vertex. Outstanding
+%% work is dropped.
 %% @end
 %%--------------------------------------------------------------------
 -spec stop(t()) -> ok.

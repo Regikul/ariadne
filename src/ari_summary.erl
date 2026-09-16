@@ -24,6 +24,7 @@
 %%% and {@link minimal/1} is what keeps such a series finite: only
 %%% the summaries no other one precedes are worth keeping.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

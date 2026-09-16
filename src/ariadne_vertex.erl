@@ -20,28 +20,22 @@
 %%% is allowed: an input like that stays silent, and whatever is sent
 %%% to an output like that is dropped.
 %%%
-%%% Beyond its slots the vertex knows nothing of the shape of the
-%%% graph: it does not see which edge a message came along, and it
-%%% does not name the edge a message goes out along. Timestamps
-%%% change only at the boundary edges of a loop scope, and the runtime
-%%% applies the change on the edge, so a vertex inside of a loop never
-%%% deals with the timestamps of the outside.
+%%% The runtime presents a vertex with slot names and routes the
+%%% messages it returns. It also applies timestamp changes at loop
+%%% boundaries. The callback therefore handles the timestamps of its
+%%% own loop depth.
 %%%
-%%% A callback does no sending of its own: it receives the event and
-%%% the state and returns the new state together with what to send
-%%% and what to be notified of, and the sending is done by the
-%%% runtime. The order of the messages returned by one call is kept
-%%% on every edge they are sent along.
+%%% A callback receives an event and its state, then returns the new
+%%% state, notification requests and outgoing messages. The runtime
+%%% performs those effects. It preserves the order of the messages
+%%% returned by one call on every edge.
 %%%
-%%% A vertex is not allowed to send into the past. Every message it
-%%% returns must carry a timestamp that is the time of the event being
-%%% handled or one that follows it, see {@link ari_vtime:le/2}. This
-%%% is what lets the runtime tell when a time is complete: once every
-%%% message of a time has been handled, no new message of that time
-%%% can appear anywhere in the graph. Returning a message of a
-%%% preceding time is an error of the vertex.
+%%% Every outgoing message must carry the time of the event being
+%%% handled or a later time, see {@link ari_vtime:le/2}. This rule lets
+%%% the runtime determine completion: after it handles all messages of
+%%% a time, no vertex can create another message at that time.
 %%%
-%%% Notifications are the way a vertex learns that a time is complete.
+%%% A notification tells a vertex that a time is complete.
 %%% While handling a message the vertex may ask to be notified at a
 %%% time; the runtime then calls {@link handle_notification/2} once
 %%% every message of a time that precedes or equals the requested one
@@ -51,39 +45,51 @@
 %%% needs no such point, e.g. a filter or a map, never asks for a
 %%% notification and works message by message.
 %%%
+%%% <h2>Callbacks</h2>
+%%% <dl>
+%%% <dt>{@link inputs/0}</dt>
+%%% <dd>Declares the input slots.</dd>
+%%% <dt>{@link outputs/0}</dt>
+%%% <dd>Declares the output slots.</dd>
+%%% <dt>{@link init/1}</dt>
+%%% <dd>Creates the vertex state from the argument stored in the
+%%% graph.</dd>
+%%% <dt>{@link handle_message/4}</dt>
+%%% <dd>Handles one item and returns state, notification requests and
+%%% outgoing messages.</dd>
+%%% <dt>{@link handle_notification/2}</dt>
+%%% <dd>Handles completion of a requested time and returns state and
+%%% outgoing messages.</dd>
+%%% <dt>{@link terminate/1}</dt>
+%%% <dd>Releases resources held by the vertex.</dd>
+%%% </dl>
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 -module(ariadne_vertex).
 
 %%--------------------------------------------------------------------
-%% @doc
 %% The names of the input slots of the vertex. The names are expected
 %% to be distinct, and none of them may name an output slot too: a
 %% slot name tells the side of the vertex on its own.
-%% @end
 %%--------------------------------------------------------------------
 -callback inputs() -> [Slot :: atom()].
 
 %%--------------------------------------------------------------------
-%% @doc
 %% The names of the output slots of the vertex. The names are expected
 %% to be distinct, and none of them may name an input slot too, see
 %% {@link inputs/0}.
-%% @end
 %%--------------------------------------------------------------------
 -callback outputs() -> [Slot :: atom()].
 
 %%--------------------------------------------------------------------
-%% @doc
 %% Creates the state of the vertex. `Args' is the value the vertex was
 %% declared with in the graph, see {@link ari_graph:node/3}. Called
 %% once, before the first message is delivered.
-%% @end
 %%--------------------------------------------------------------------
 -callback init(Args :: term()) -> State :: term().
 
 %%--------------------------------------------------------------------
-%% @doc
 %% Handles a message that arrived at the input slot `Slot' of the
 %% vertex. `Time' is the timestamp of the message.
 %%
@@ -99,7 +105,6 @@
 %% times returns an empty list.
 %%
 %% Every message returned must carry `Time' or a time that follows it.
-%% @end
 %%--------------------------------------------------------------------
 -callback handle_message(
     Slot :: atom(), Message :: term(), Time :: ari_vtime:t(), State :: term()
@@ -111,7 +116,6 @@
     }.
 
 %%--------------------------------------------------------------------
-%% @doc
 %% Handles a notification requested earlier by {@link
 %% handle_message/4}. When called, every message of a time that
 %% precedes or equals `Time' has been delivered to the vertex, and no
@@ -124,7 +128,6 @@
 %% a time that follows it. No notification can be requested from
 %% here; a vertex that needs to be notified again asks for it when
 %% handling a message.
-%% @end
 %%--------------------------------------------------------------------
 -callback handle_notification(
     Time :: ari_vtime:t(), State :: term()
@@ -135,9 +138,7 @@
     }.
 
 %%--------------------------------------------------------------------
-%% @doc
 %% Releases the resources of the vertex. Called once, when the graph
 %% is shut down; no callback of the vertex is called afterwards.
-%% @end
 %%--------------------------------------------------------------------
 -callback terminate(State :: term()) -> ok.

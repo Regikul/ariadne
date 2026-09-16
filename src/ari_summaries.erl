@@ -31,6 +31,7 @@
 %%% returns/4} answers it for the notifications a vertex itself has
 %%% pending, which reach its later times around a cycle alone.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

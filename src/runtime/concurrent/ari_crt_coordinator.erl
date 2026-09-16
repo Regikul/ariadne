@@ -51,6 +51,7 @@
 %%% first call is served, so a worker is wired before it is given any
 %%% work.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

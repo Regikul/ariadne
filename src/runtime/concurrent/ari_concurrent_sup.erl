@@ -11,6 +11,7 @@
 %%% of its processes fails, the branch stops without restarting, and
 %%% the supervisor above decides what to do about it.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 

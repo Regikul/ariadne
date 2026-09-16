@@ -4,7 +4,7 @@
 %%% for running.
 %%%
 %%% {@link prepare/1} takes the graph built by {@link ari_graph:graph/1}
-%%% and puts it against the callback modules of its vertices (see
+%%% and validates it against the callback modules of its vertices (see
 %%% {@link ariadne_vertex}): every end of an edge has to be a slot of
 %%% the right side of an existing vertex, every border edge has to
 %%% agree with the scopes of its ends, and every cycle has to advance
@@ -15,11 +15,11 @@
 %%% ari_summaries}), so that the runtime can tell when a time is
 %%% complete.
 %%%
-%%% A plan is immutable. It holds no state of a run -- no vertex
-%%% states, no pending messages, no outstanding notifications; those
-%%% belong to the runtime, which can run one plan many times, and two
-%%% runtimes can share one and the same plan.
+%%% A plan stores immutable topology and path summaries. A runtime
+%%% stores vertex states, pending messages and outstanding
+%%% notifications. Several runtimes can share one plan.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -62,8 +62,8 @@
 -type slots() :: #{atom() => {Inputs :: [atom()], Outputs :: [atom()]}}.
 
 %% A prepared edge. An end left `undefined' is the outside world.
-%% The key is the partitioning of the edge, see `edge_opts()' in
-%% `ari_graph.hrl', or `undefined' for an edge not partitioned.
+%% The key is the partitioning function from the edge options, or
+%% `undefined' for an edge not partitioned.
 -record(pedge, {
     kind :: kind(),
     from :: endpoint() | undefined,
@@ -163,9 +163,8 @@ edge(#plan{edges = Edges}, Name) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The key the items of the edge `Name' are partitioned by, see
-%% `edge_opts()' in `ari_graph.hrl', or `undefined' if the edge is
-%% not partitioned.
+%% The function that partitions the items of the edge `Name', or
+%% `undefined' if the edge is not partitioned.
 %%
 %% Fails with `{badkey, Name}' if the plan has no such edge.
 %% @end

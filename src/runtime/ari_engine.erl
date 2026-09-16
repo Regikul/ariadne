@@ -21,6 +21,7 @@
 %%% What a vertex returns is checked on the spot, see {@link
 %%% deliver/2}.
 %%%
+%%% @private
 %%% @end
 %%%-------------------------------------------------------------------
 
