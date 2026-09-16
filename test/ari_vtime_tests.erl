@@ -133,6 +133,12 @@ le_is_transitive_test() ->
         ]
     ).
 
+a_timestamp_is_outside_of_every_loop_until_it_enters_one_test() ->
+    T = ari_vtime:new(3),
+    ?assert(ari_vtime:outside(T)),
+    ?assertNot(ari_vtime:outside(ari_vtime:ingress(T))),
+    ?assert(ari_vtime:outside(ari_vtime:egress(ari_vtime:ingress(T)))).
+
 le_needs_one_and_the_same_loop_depth_test() ->
     ?assertError(
         function_clause,

@@ -104,6 +104,36 @@ a_notification_upstream_keeps_a_time_from_completing_test() ->
     ?assertNot(ari_progress:complete(summaries(), {second, T}, P1)).
 
 %%%===================================================================
+%%% The frontier
+%%%===================================================================
+
+work_released_off_the_frontier_uncovers_the_work_behind_it_test() ->
+    T0 = ari_vtime:new(0),
+    T1 = ari_vtime:new(1),
+    {ok, P0} = ari_progress:close(input, 1, ari_progress:new([input])),
+    P1 = ari_progress:apply({[], [{{edge, link}, T0}, {{edge, link}, T1}]}, P0),
+    ?assertNot(ari_progress:complete(summaries(), {second, T0}, P1)),
+    ?assertNot(ari_progress:complete(summaries(), {second, T1}, P1)),
+    P2 = ari_progress:apply({[{{edge, link}, T0}], []}, P1),
+    ?assert(ari_progress:complete(summaries(), {second, T0}, P2)),
+    ?assertNot(ari_progress:complete(summaries(), {second, T1}, P2)),
+    P3 = ari_progress:apply({[{{edge, link}, T1}], []}, P2),
+    ?assert(ari_progress:complete(summaries(), {second, T1}, P3)).
+
+work_at_incomparable_times_is_on_the_frontier_side_by_side_test() ->
+    %% {0, [1]} and {1, [0]}: the second iteration of epoch 0 and the
+    %% first of epoch 1, neither preceding the other.
+    Later = ari_vtime:feedback(ari_vtime:ingress(ari_vtime:new(0))),
+    Next = ari_vtime:ingress(ari_vtime:new(1)),
+    {ok, P0} = ari_progress:close(input, 1, ari_progress:new([input])),
+    P1 = ari_progress:apply({[], [{{edge, again}, Later}, {{edge, again}, Next}]}, P0),
+    ?assertNot(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Later)}, P1)),
+    ?assertNot(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Next)}, P1)),
+    P2 = ari_progress:apply({[{{edge, again}, Later}], []}, P1),
+    ?assert(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Later)}, P2)),
+    ?assertNot(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Next)}, P2)).
+
+%%%===================================================================
 %%% Helpers
 %%%===================================================================
 
@@ -116,4 +146,17 @@ summaries() ->
         ari_graph:edge(link, {first, out}, {second, in}),
         ari_graph:node(second, ari_test_pass, []),
         ari_graph:out(output, {second, out})
+    ])).
+
+%% The summaries of a vertex iterating through a feedback edge:
+%% `input' leads into the loop to `inc', `again' from `inc' back to
+%% itself.
+looping() ->
+    ari_summaries:build(ari_graph:graph([
+        ari_graph:in(input, {inc, in}),
+        ari_graph:loop(spin, [
+            ari_graph:node(inc, ari_test_until, 3),
+            ari_graph:feedback(again, {inc, continue}, {inc, in})
+        ]),
+        ari_graph:out(output, {inc, done})
     ])).

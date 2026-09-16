@@ -11,6 +11,13 @@
 %%% themselves: several engines running copies of one graph (see
 %%% {@link ari_engine}) can feed one and the same progress.
 %%%
+%%% Along with the counts, the progress keeps the frontier of every
+%%% location: the outstanding times of the location no other
+%%% outstanding time of it precedes. Whether a time is complete is
+%%% told by the frontier alone, since a later time at a location
+%%% reaches no further than an earlier one does, so the cost of the
+%%% question is that of the graph, not of the work outstanding.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -50,7 +57,13 @@
 -record(progress, {
     %% How many items of work are outstanding at every pointstamp.
     pending :: #{pointstamp() => pos_integer()},
-    %% How many of them are messages, i.e. outstanding on an edge.
+    %% The times work is outstanding at, of every location with any,
+    %% in the order of terms, which puts a time before every time it
+    %% precedes.
+    times :: #{ari_summaries:location() => gb_sets:set(ari_vtime:t())},
+    %% The frontier of every location with work outstanding.
+    frontier :: #{ari_summaries:location() => [ari_vtime:t(), ...]},
+    %% How many of the items are messages, i.e. outstanding on an edge.
     in_flight :: non_neg_integer(),
     %% The first open epoch of every input.
     inputs :: #{atom() => non_neg_integer()}
@@ -69,6 +82,8 @@
 new(Inputs) ->
     #progress{
         pending = #{},
+        times = #{},
+        frontier = #{},
         in_flight = 0,
         inputs = #{Input => 0 || Input <- Inputs}
     }.
@@ -116,16 +131,10 @@ close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec apply(delta(), t()) -> t().
-apply({Released, Added}, #progress{pending = Pending, in_flight = InFlight} = Progress) ->
-    Counted = lists:foldl(
-        fun(Pointstamp, Acc) -> maps:update_with(Pointstamp, fun(N) -> N + 1 end, 1, Acc) end,
-        Pending,
-        Added
-    ),
-    Progress#progress{
-        pending = lists:foldl(fun release/2, Counted, Released),
-        in_flight = InFlight + messages(Added) - messages(Released)
-    }.
+apply({Released, Added}, #progress{in_flight = InFlight} = Progress) ->
+    Counted = lists:foldl(fun add/2, Progress, Added),
+    Applied = lists:foldl(fun release/2, Counted, Released),
+    Applied#progress{in_flight = InFlight + messages(Added) - messages(Released)}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -145,13 +154,23 @@ in_flight(#progress{in_flight = InFlight}) ->
 %% earlier time arriving at the vertex, see {@link
 %% ari_summaries:reaches/5}. An open input is outstanding at its
 %% first open epoch; the later ones reach no further.
+%%
+%% Only the frontiers are asked. A time a frontier time precedes
+%% reaches no further than the frontier time does. The notification
+%% left aside is either on the frontier of the vertex, and then no
+%% other outstanding time of the vertex precedes `Time', and none
+%% that follows it or is incomparable with it comes back at `Time'
+%% or earlier, since no path leads to an earlier time; or it is not,
+%% and then a frontier time of the vertex precedes `Time' and keeps
+%% it from completing.
 %% @end
 %%--------------------------------------------------------------------
 -spec complete(ari_summaries:t(), {Vertex :: atom(), ari_vtime:t()}, t()) -> boolean().
-complete(Summaries, {Vertex, Time}, #progress{pending = Pending, inputs = Inputs}) ->
+complete(Summaries, {Vertex, Time}, #progress{frontier = Frontier, inputs = Inputs}) ->
     Self = {{vertex, Vertex}, Time},
     Outstanding =
-        [Pointstamp || Pointstamp := _Count <- Pending, Pointstamp =/= Self] ++
+        [{Location, Earliest} ||
+            Location := Frontline <- Frontier, Earliest <- Frontline, {Location, Earliest} =/= Self] ++
         [{{edge, Input}, ari_vtime:new(Open)} || Input := Open <- Inputs],
     not lists:any(
         fun({Location, From}) ->
@@ -177,15 +196,108 @@ messages(Pointstamps) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Takes one item of work off a pointstamp.
+%% Puts one item of work on a pointstamp. A time new to its location
+%% is put on the frontier of the location unless a time there
+%% precedes it.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec release(pointstamp(), #{pointstamp() => pos_integer()}) -> #{pointstamp() => pos_integer()}.
-release(Pointstamp, Pending) ->
+-spec add(pointstamp(), t()) -> t().
+add({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
     case Pending of
-        #{Pointstamp := 1} -> maps:remove(Pointstamp, Pending);
-        #{Pointstamp := N} -> Pending#{Pointstamp := N - 1};
-        _ -> error({unbalanced, Pointstamp})
+        #{Pointstamp := N} ->
+            Progress#progress{pending = Pending#{Pointstamp := N + 1}};
+        _ ->
+            #progress{times = Times, frontier = Frontier} = Progress,
+            Progress#progress{
+                pending = Pending#{Pointstamp => 1},
+                times = Times#{Location => gb_sets:add(Time, maps:get(Location, Times, gb_sets:empty()))},
+                frontier = Frontier#{Location => earliest(Time, maps:get(Location, Frontier, []))}
+            }
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Takes one item of work off a pointstamp. A time taken off its
+%% location for good leaves the frontier of the location, which is
+%% then built anew from the times left, if it was on it: outside of
+%% every loop the times are totally ordered and the frontier is the
+%% earliest time left; inside, the times left are gone over.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec release(pointstamp(), t()) -> t().
+release({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
+    case Pending of
+        #{Pointstamp := 1} ->
+            #progress{times = Times, frontier = Frontier} = Progress,
+            Left = gb_sets:delete(Time, maps:get(Location, Times)),
+            case gb_sets:is_empty(Left) of
+                true ->
+                    Progress#progress{
+                        pending = maps:remove(Pointstamp, Pending),
+                        times = maps:remove(Location, Times),
+                        frontier = maps:remove(Location, Frontier)
+                    };
+                false ->
+                    Frontline = maps:get(Location, Frontier),
+                    Progress#progress{
+                        pending = maps:remove(Pointstamp, Pending),
+                        times = Times#{Location := Left},
+                        frontier =
+                            case lists:member(Time, Frontline) of
+                                true -> Frontier#{Location := earliest_of(Left)};
+                                false -> Frontier
+                            end
+                    }
+            end;
+        #{Pointstamp := N} ->
+            Progress#progress{pending = Pending#{Pointstamp := N - 1}};
+        _ ->
+            error({unbalanced, Pointstamp})
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The frontier of the times of `Times', which has some.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec earliest_of(gb_sets:set(ari_vtime:t())) -> [ari_vtime:t(), ...].
+earliest_of(Times) ->
+    Smallest = gb_sets:smallest(Times),
+    case ari_vtime:outside(Smallest) of
+        true -> [Smallest];
+        false -> earliest(gb_sets:to_list(Times))
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The frontier of the times `Times': those no other one of them
+%% precedes.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec earliest([ari_vtime:t(), ...]) -> [ari_vtime:t(), ...].
+earliest(Times) ->
+    lists:foldl(fun earliest/2, [], Times).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Puts the time `Time' on the frontier `Frontline': the frontier is
+%% left as it is if a time on it precedes `Time'; otherwise `Time'
+%% goes on it and the times it precedes go off.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec earliest(ari_vtime:t(), [ari_vtime:t()]) -> [ari_vtime:t(), ...].
+earliest(Time, Frontline) ->
+    case lists:any(fun(Earliest) -> ari_vtime:le(Earliest, Time) end, Frontline) of
+        true -> Frontline;
+        false -> [Time | [Earliest || Earliest <- Frontline, not ari_vtime:le(Time, Earliest)]]
     end.

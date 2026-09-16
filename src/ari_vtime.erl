@@ -33,7 +33,8 @@
     ingress/1,
     egress/1,
     feedback/1,
-    le/2
+    le/2,
+    outside/1
 ]).
 
 -export_type([
@@ -116,6 +117,17 @@ feedback({Epoch, [Outer | Iterations]}) ->
 -spec le(A :: t(), B :: t()) -> boolean().
 le({EpochA, IterationsA}, {EpochB, IterationsB}) ->
     le_iterations(IterationsA, IterationsB) andalso EpochA =< EpochB.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Tells whether the timestamp is of an item outside of every loop.
+%% There the order of the timestamps is total: of any two, one
+%% precedes the other.
+%% @end
+%%--------------------------------------------------------------------
+-spec outside(t()) -> boolean().
+outside({_Epoch, Iterations}) ->
+    Iterations =:= [].
 
 %%%===================================================================
 %%% Internal functions

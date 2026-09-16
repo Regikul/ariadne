@@ -38,6 +38,7 @@
     deliver/2,
     notify/3,
     notifications/1,
+    asked/1,
     pull/2,
     stop/1
 ]).
@@ -64,7 +65,7 @@
     %% by copy, the latest first.
     outbox :: #{pos_integer() => [event()]},
     %% The notifications asked for and not delivered yet.
-    notifications :: #{{Vertex :: atom(), ari_vtime:t()} => []},
+    notifications :: ari_asked:t([]),
     %% The items that left the graph along every output, the latest
     %% first.
     outputs :: #{atom() => [{Message :: term(), ari_vtime:t()}]}
@@ -103,7 +104,7 @@ new(Plan, Index, Count) when Index >= 1, Index =< Count ->
         states = init(Plan, ari_plan:vertices(Plan), #{}),
         queue = queue:new(),
         outbox = #{},
-        notifications = #{},
+        notifications = ari_asked:new(),
         outputs = #{Output => [] || Output <- ari_plan:outputs(Plan)}
     }.
 
@@ -211,12 +212,13 @@ deliver({Edge, Message, Time}, #engine{plan = Plan, states = States} = Engine) -
 %%--------------------------------------------------------------------
 -spec notify(Vertex :: atom(), ari_vtime:t(), t()) -> {t(), ari_progress:delta()}.
 notify(Vertex, Time, #engine{plan = Plan, states = States, notifications = Requested} = Engine) ->
-    is_map_key({Vertex, Time}, Requested) orelse error({unknown_notification, {Vertex, Time}}),
+    ari_asked:find(Vertex, Time, Requested) =/= none orelse
+        error({unknown_notification, {Vertex, Time}}),
     {Module, _Args} = ari_plan:vertex(Plan, Vertex),
     {State, Messages} = Module:handle_notification(Time, maps:get(Vertex, States)),
     Engine2 = Engine#engine{
         states = States#{Vertex := State},
-        notifications = maps:remove({Vertex, Time}, Requested)
+        notifications = ari_asked:remove(Vertex, Time, Requested)
     },
     {Engine3, Sent} = send(Vertex, Time, Messages, Engine2),
     {Engine3, {[{{vertex, Vertex}, Time}], Sent}}.
@@ -229,7 +231,17 @@ notify(Vertex, Time, #engine{plan = Plan, states = States, notifications = Reque
 %%--------------------------------------------------------------------
 -spec notifications(t()) -> [{Vertex :: atom(), ari_vtime:t()}].
 notifications(#engine{notifications = Requested}) ->
-    maps:keys(Requested).
+    [{Vertex, Time} || {Vertex, Time, []} <- ari_asked:to_list(Requested)].
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The notifications asked for and not delivered yet, as kept: by
+%% the vertex in the order of their times, see {@link ari_asked}.
+%% @end
+%%--------------------------------------------------------------------
+-spec asked(t()) -> ari_asked:t([]).
+asked(#engine{notifications = Requested}) ->
+    Requested.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -340,11 +352,11 @@ request(Vertex, Event, Times, Engine) ->
     {Engine2, Added} = lists:foldl(
         fun(Time, {#engine{notifications = Requested} = Acc, AddedAcc}) ->
             follows(Event, Time) orelse error({notification_in_the_past, {Vertex, Time}}),
-            case is_map_key({Vertex, Time}, Requested) of
-                true ->
+            case ari_asked:find(Vertex, Time, Requested) of
+                {value, []} ->
                     {Acc, AddedAcc};
-                false ->
-                    {Acc#engine{notifications = Requested#{{Vertex, Time} => []}},
+                none ->
+                    {Acc#engine{notifications = ari_asked:add(Vertex, Time, [], Requested)},
                      [{{vertex, Vertex}, Time} | AddedAcc]}
             end
         end,

@@ -34,10 +34,10 @@
 %%% never waits.
 %%%
 %%% A notification a worker asks for is remembered along with the
-%%% worker. Whenever the progress changes -- a delta is applied or an
-%%% epoch is closed -- the coordinator tells whether the time of
-%%% every notification remembered is complete, and tells the workers
-%%% to deliver those that are, the earliest times first.
+%%% worker, see {@link ari_asked}. Whenever the progress changes -- a
+%%% delta is applied or an epoch is closed -- the coordinator tells
+%%% the workers to deliver the notifications whose time is complete,
+%%% the earliest times first.
 %%%
 %%% The coordinator is the last process of the branch to start. Once
 %%% up, it finds the workers in the group `workers' of the scope of
@@ -81,7 +81,7 @@
     waiting :: queue:queue(push()),
     %% The workers that asked for every notification not told to be
     %% delivered yet.
-    asked :: #{{Vertex :: atom(), ari_vtime:t()} => [pid()]}
+    asked :: ari_asked:t([pid()])
 }).
 
 %% A push waiting for room, with whom to answer.
@@ -160,7 +160,7 @@ init({Name, Plan, Count, Limit}) ->
         next = 1,
         limit = Limit,
         waiting = queue:new(),
-        asked = #{}
+        asked = ari_asked:new()
     },
     {ok, Coordinator, {continue, wire}}.
 
@@ -198,7 +198,12 @@ handle_cast({delta, Worker, {_Released, Added} = Delta}, Coordinator) ->
     Asked2 = lists:foldl(
         fun
             ({{vertex, Vertex}, Time}, Acc) ->
-                maps:update_with({Vertex, Time}, fun(Ws) -> [Worker | Ws] end, [Worker], Acc);
+                Workers =
+                    case ari_asked:find(Vertex, Time, Acc) of
+                        {value, Ws} -> Ws;
+                        none -> []
+                    end,
+                ari_asked:add(Vertex, Time, [Worker | Workers], Acc);
             ({{edge, _Edge}, _Time}, Acc) ->
                 Acc
         end,
@@ -314,19 +319,12 @@ feed(Input, Time, Messages, #coordinator{plan = Plan, workers = Workers, count =
 -spec dispatch(#coordinator{}) -> #coordinator{}.
 dispatch(#coordinator{plan = Plan, progress = Progress, asked = Asked} = Coordinator) ->
     Summaries = ari_plan:summaries(Plan),
-    Ordered = lists:sort([{Time, Vertex} || {Vertex, Time} := _Workers <- Asked]),
-    Remaining = lists:foldl(
-        fun({Time, Vertex}, Acc) ->
-            case ari_progress:complete(Summaries, {Vertex, Time}, Progress) of
-                true ->
-                    Workers = maps:get({Vertex, Time}, Acc),
-                    lists:foreach(fun(W) -> ari_crt_worker:notify(W, Vertex, Time) end, Workers),
-                    maps:remove({Vertex, Time}, Acc);
-                false ->
-                    Acc
-            end
+    Complete = fun(Vertex, Time) -> ari_progress:complete(Summaries, {Vertex, Time}, Progress) end,
+    {Due, Remaining} = ari_asked:due(Complete, Asked),
+    lists:foreach(
+        fun({Vertex, Time, Workers}) ->
+            lists:foreach(fun(W) -> ari_crt_worker:notify(W, Vertex, Time) end, Workers)
         end,
-        Asked,
-        Ordered
+        Due
     ),
     Coordinator#coordinator{asked = Remaining}.

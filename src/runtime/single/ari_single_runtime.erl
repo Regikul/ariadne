@@ -195,12 +195,8 @@ track({Engine, Delta}, #runtime{progress = Progress} = Runtime) ->
 %% notification whose time is complete. A message is taken off the
 %% queue; a notification is left where it is until it is delivered.
 %%
-%% The notifications are tried in the order of their times: a time
-%% precedes every time following it in the order of terms, so a
-%% notification is not blocked by any of those tried after it, and
-%% the earliest one is usually complete. Telling whether a time is
-%% complete is the expensive part, and the order keeps the number of
-%% times it is told close to the number of notifications delivered.
+%% The notification is the earliest complete one, found the way
+%% {@link ari_asked:first/2} does.
 %%
 %% @private
 %% @end
@@ -213,14 +209,11 @@ next(#runtime{plan = Plan, engine = Engine, progress = Progress} = Runtime) ->
             {message, Event, Runtime#runtime{engine = Engine2}};
         empty ->
             Summaries = ari_plan:summaries(Plan),
-            Requested = lists:sort(
-                [{Time, Vertex} || {Vertex, Time} <- ari_engine:notifications(Engine)]
-            ),
-            Complete = fun({Time, Vertex}) ->
+            Complete = fun(Vertex, Time) ->
                 ari_progress:complete(Summaries, {Vertex, Time}, Progress)
             end,
-            case lists:search(Complete, Requested) of
-                {value, {Time, Vertex}} -> {notification, Vertex, Time};
-                false -> idle
+            case ari_asked:first(Complete, ari_engine:asked(Engine)) of
+                {value, {Vertex, Time, []}} -> {notification, Vertex, Time};
+                none -> idle
             end
     end.
