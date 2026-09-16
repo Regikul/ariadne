@@ -198,20 +198,22 @@ Children = [
 ].
 ```
 
-Subscribe before pushing items so the subscriber observes every output:
+Subscribe before pushing items so the subscriber observes every output. The returned monitor belongs to this incarnation of the runtime:
 
 ```erlang
-ok = ari_concurrent_runtime:subscribe(orders, output),
+{Coordinator, Monitor} = ari_concurrent_runtime:subscribe(orders, output),
 ok = ari_concurrent_runtime:push(orders, input, 0, [1, 2, 3]),
 ok = ari_concurrent_runtime:close(orders, input, 0),
 
 receive
     {ariadne, orders, output, Item, Time} ->
-        handle(Item, Time)
+        handle(Item, Time);
+    {'DOWN', Monitor, process, Coordinator, Reason} ->
+        handle_runtime_stopped(Reason)
 end.
 ```
 
-The name `orders` identifies one runtime on the local node.
+The name `orders` identifies one runtime on the local node. A restarted runtime is a new incarnation: the old coordinator monitor goes down, and the process must subscribe again to receive its output.
 
 ### Options
 
@@ -253,6 +255,7 @@ The two runtimes report input errors differently:
 | Push to a closed epoch | raises `error({closed, {Input, Epoch}})` | returns `{error, {closed, {Input, Epoch}}}` |
 | Unknown output | `pull/2` raises `error({unknown_output, Output})` | Subscribers to an unused name receive no items |
 | Runtime is not running | not applicable | the call exits with `{not_running, Name}` |
+| Runtime changes during subscription | not applicable | `subscribe/2` exits with `{runtime_changed, Name}` |
 
 Graph validation and vertex initialization happen in `ari_single_runtime:new/1` or when the concurrent supervision branch starts. The single runtime raises validation errors such as `duplicate_vertex`, `unknown_slot`, or `non_advancing_cycle`. An invalid concurrent child fails to start and reports the validation error to its parent supervisor.
 

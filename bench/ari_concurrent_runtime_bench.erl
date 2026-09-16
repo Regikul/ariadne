@@ -380,7 +380,7 @@ consumer(Load, Workers) ->
         %% A mailbox of a hundred thousand items on the heap would
         %% be copied by every collection.
         _ = process_flag(message_queue_data, off_heap),
-        ok = ari_concurrent_runtime:subscribe(?NAME, output),
+        {_, _} = ari_concurrent_runtime:subscribe(?NAME, output),
         Self ! {subscribed, self()},
         consume(1),
         First = erlang:monotonic_time(microsecond),

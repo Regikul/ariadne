@@ -13,10 +13,13 @@
 %%% ari_concurrent_runtime:child_spec(counting, Graph, #{workers => 4}),
 %%%
 %%% %% in the process feeding the graph:
-%%% ok = ari_concurrent_runtime:subscribe(counting, done),
+%%% {Coordinator, Monitor} = ari_concurrent_runtime:subscribe(counting, done),
 %%% ok = ari_concurrent_runtime:push(counting, input, 0, [A, B]),
 %%% ok = ari_concurrent_runtime:close(counting, input, 0),
-%%% receive {ariadne, counting, done, Message, Time} -> ... end.
+%%% receive
+%%%     {ariadne, counting, done, Message, Time} -> ...;
+%%%     {'DOWN', Monitor, process, Coordinator, Reason} -> ...
+%%% end.
 %%% '''
 %%%
 %%% Inputs use the epochs described by {@link ari_single_runtime}.
@@ -113,7 +116,12 @@ child_spec(Name, Graph, Opts) ->
 -spec push(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer(), Messages :: [term()]) ->
     ok | {error, ari_progress:refusal()}.
 push(Name, Input, Epoch, Messages) ->
-    ari_crt_coordinator:push(coordinator(Name), Input, Epoch, Messages).
+    case coordinator(Name) of
+        {ok, Coordinator} ->
+            ari_crt_coordinator:push(Coordinator, Input, Epoch, Messages);
+        error ->
+            exit({not_running, Name})
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -130,7 +138,12 @@ push(Name, Input, Epoch, Messages) ->
 -spec close(Name :: atom(), Input :: atom(), Epoch :: non_neg_integer()) ->
     ok | {error, ari_progress:refusal()}.
 close(Name, Input, Epoch) ->
-    ari_crt_coordinator:close(coordinator(Name), Input, Epoch).
+    case coordinator(Name) of
+        {ok, Coordinator} ->
+            ari_crt_coordinator:close(Coordinator, Input, Epoch);
+        error ->
+            exit({not_running, Name})
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -139,14 +152,35 @@ close(Name, Input, Epoch) ->
 %% is sent to it as `{ariadne, Name, Output, Message, Time}'. Items
 %% of an output nobody is subscribed to are dropped.
 %%
+%% Returns the coordinator of the current incarnation of the runtime
+%% and a monitor reference for it. When the coordinator terminates,
+%% the caller receives `{'DOWN', Monitor, process, Coordinator,
+%% Reason}' and the subscription no longer applies. A restarted
+%% runtime is a new incarnation and has to be subscribed to again.
+%%
 %% For a high-volume output, the subscriber can set the process flag
 %% `message_queue_data' to `off_heap' to reduce garbage-collection
 %% costs while its mailbox contains messages.
+%%
+%% The call exits with:
+%% <ul>
+%% <li>`{not_running, Name}' -- the runtime has no current scope or
+%% coordinator;</li>
+%% <li>`{runtime_changed, Name}' -- another scope becomes current
+%% while the subscription is being made.</li>
+%% </ul>
 %% @end
 %%--------------------------------------------------------------------
--spec subscribe(Name :: atom(), Output :: atom()) -> ok.
+-spec subscribe(Name :: atom(), Output :: atom()) ->
+    {Coordinator :: pid(), Monitor :: reference()}.
 subscribe(Name, Output) ->
-    pg:join(Name, {output, Output}, self()).
+    case runtime(Name) of
+        {ok, Scope, Coordinator} ->
+            Monitor = monitor(process, Coordinator),
+            subscribe(Name, Output, self(), Scope, Coordinator, Monitor);
+        {error, Reason} ->
+            exit({Reason, Name})
+    end.
 
 %%%===================================================================
 %%% Internal functions
@@ -154,15 +188,104 @@ subscribe(Name, Output) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The coordinator of the runtime `Name'. Exits with `{not_running,
-%% Name}' if there is none.
+%% The `pg' scope and coordinator of one incarnation of the runtime
+%% `Name'. Distinguishes a runtime with no current coordinator from
+%% one whose scope changes while the coordinator is looked up.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec coordinator(Name :: atom()) -> pid().
+-spec runtime(Name :: atom()) ->
+    {ok, Scope :: pid(), Coordinator :: pid()} | {error, not_running | runtime_changed}.
+runtime(Name) ->
+    case whereis(Name) of
+        undefined ->
+            {error, not_running};
+        Scope ->
+            case coordinator(Name) of
+                {ok, Coordinator} ->
+                    case current(Name, Scope) of
+                        current -> {ok, Scope, Coordinator};
+                        Reason -> {error, Reason}
+                    end;
+                error ->
+                    {error, unavailable(Name, Scope)}
+            end
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The coordinator of the runtime `Name', or `error' if there is
+%% none.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec coordinator(Name :: atom()) -> {ok, Coordinator :: pid()} | error.
 coordinator(Name) ->
     case pg:get_local_members(Name, coordinator) of
-        [Coordinator] -> Coordinator;
-        [] -> exit({not_running, Name})
+        [Coordinator] -> {ok, Coordinator};
+        [] -> error
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Joins `Subscriber' to the output group of the incarnation whose
+%% scope is `Scope'. If another scope has become current by the time
+%% the join is done, rolls the join and monitor back and exits with
+%% the reason that describes the current runtime state.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec subscribe(atom(), atom(), pid(), pid(), pid(), reference()) -> {pid(), reference()}.
+subscribe(Name, Output, Subscriber, Scope, Coordinator, Monitor) ->
+    try
+        ok = pg:join(Name, {output, Output}, Subscriber)
+    catch
+        exit:_Reason ->
+            _ = demonitor(Monitor, [flush]),
+            exit({unavailable(Name, Scope), Name});
+        Class:Error:Stacktrace ->
+            _ = demonitor(Monitor, [flush]),
+            erlang:raise(Class, Error, Stacktrace)
+    end,
+    case current(Name, Scope) of
+        current ->
+            {Coordinator, Monitor};
+        Reason ->
+            subscription_failed(Name, Output, Subscriber, Monitor, Reason)
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%%--------------------------------------------------------------------
+-spec subscription_failed(atom(), atom(), pid(), reference(), not_running | runtime_changed) ->
+    no_return().
+subscription_failed(Name, Output, Subscriber, Monitor, Reason) ->
+    %% The old scope may be gone already. If the join reached a new
+    %% scope, one leave compensates its one membership.
+    _ = catch pg:leave(Name, {output, Output}, Subscriber),
+    _ = demonitor(Monitor, [flush]),
+    exit({Reason, Name}).
+
+%%--------------------------------------------------------------------
+%% @private
+%%--------------------------------------------------------------------
+-spec current(atom(), pid()) -> current | not_running | runtime_changed.
+current(Name, Scope) ->
+    case whereis(Name) of
+        Scope -> current;
+        undefined -> not_running;
+        _AnotherScope -> runtime_changed
+    end.
+
+%%--------------------------------------------------------------------
+%% @private
+%%--------------------------------------------------------------------
+-spec unavailable(atom(), pid()) -> not_running | runtime_changed.
+unavailable(Name, Scope) ->
+    case current(Name, Scope) of
+        runtime_changed -> runtime_changed;
+        _ -> not_running
     end.

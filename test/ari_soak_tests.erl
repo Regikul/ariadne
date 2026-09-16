@@ -70,7 +70,7 @@ concurrent_action({close, Epoch}) ->
 collector(Parent, Target) ->
     Collector = spawn_link(fun() ->
         _ = process_flag(message_queue_data, off_heap),
-        ok = ari_concurrent_runtime:subscribe(ari_short_soak, output),
+        {_, _} = ari_concurrent_runtime:subscribe(ari_short_soak, output),
         Parent ! {subscribed, self()},
         collect(Parent, Target, 0, #{})
     end),

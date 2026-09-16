@@ -61,7 +61,8 @@ the_branch_refuses_bad_options_test() ->
 %%%===================================================================
 
 a_call_to_a_runtime_not_running_exits_test() ->
-    ?assertExit({not_running, nobody}, ari_concurrent_runtime:push(nobody, input, 0, [a])).
+    ?assertExit({not_running, nobody}, ari_concurrent_runtime:push(nobody, input, 0, [a])),
+    ?assertExit({not_running, nobody}, ari_concurrent_runtime:subscribe(nobody, output)).
 
 the_calls_reach_the_coordinator_test() ->
     Sup = start(called, chain(), 1),
@@ -69,11 +70,35 @@ the_calls_reach_the_coordinator_test() ->
     ?assertEqual(ok, ari_concurrent_runtime:close(called, input, 0)),
     stop(Sup).
 
-subscribing_joins_the_group_of_the_output_test() ->
+subscribing_joins_the_group_and_monitors_the_incarnation_test() ->
     Sup = start(subscribed, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(subscribed, output),
+    {Coordinator, Monitor} = ari_concurrent_runtime:subscribe(subscribed, output),
+    ?assertEqual([Coordinator], pg:get_local_members(subscribed, coordinator)),
+    ?assert(is_reference(Monitor)),
     ?assertEqual([self()], pg:get_local_members(subscribed, {output, output})),
-    stop(Sup).
+    stop(Sup),
+    receive
+        {'DOWN', Monitor, process, Coordinator, _Reason} -> ok
+    after 1000 ->
+        error(coordinator_still_running)
+    end.
+
+a_restarted_runtime_has_to_be_subscribed_to_again_test() ->
+    Sup = start(restarted, chain(), 1),
+    {Coordinator, Monitor} = ari_concurrent_runtime:subscribe(restarted, output),
+    stop(Sup),
+    receive
+        {'DOWN', Monitor, process, Coordinator, _Reason} -> ok
+    after 1000 ->
+        error(coordinator_still_running)
+    end,
+    Sup2 = start(restarted, chain(), 1),
+    ?assertEqual([], pg:get_local_members(restarted, {output, output})),
+    {Coordinator2, Monitor2} = ari_concurrent_runtime:subscribe(restarted, output),
+    ?assertNotEqual(Coordinator, Coordinator2),
+    ?assertEqual([self()], pg:get_local_members(restarted, {output, output})),
+    _ = demonitor(Monitor2, [flush]),
+    stop(Sup2).
 
 an_input_has_to_exist_test() ->
     Sup = start(strict, chain(), 1),
@@ -83,7 +108,7 @@ an_input_has_to_exist_test() ->
 
 a_closed_epoch_takes_no_items_and_the_runtime_goes_on_test() ->
     Sup = start(refusing, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(refusing, output),
+    {_, _} = ari_concurrent_runtime:subscribe(refusing, output),
     ok = ari_concurrent_runtime:close(refusing, input, 0),
     ?assertEqual({error, {closed, {input, 0}}}, ari_concurrent_runtime:push(refusing, input, 0, [a])),
     ok = ari_concurrent_runtime:push(refusing, input, 1, [b]),
@@ -96,7 +121,7 @@ a_closed_epoch_takes_no_items_and_the_runtime_goes_on_test() ->
 
 messages_pass_through_the_graph_to_the_subscribers_test() ->
     Sup = start(passing, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(passing, output),
+    {_, _} = ari_concurrent_runtime:subscribe(passing, output),
     ok = ari_concurrent_runtime:push(passing, input, 0, [a, b, c]),
     T = ari_vtime:new(0),
     ?assertEqual([{a, T}, {b, T}, {c, T}], receive_n(3, passing, output)),
@@ -104,7 +129,7 @@ messages_pass_through_the_graph_to_the_subscribers_test() ->
 
 the_items_are_spread_over_the_workers_in_turn_test() ->
     Sup = start(spread, tracing(), 2),
-    ok = ari_concurrent_runtime:subscribe(spread, output),
+    {_, _} = ari_concurrent_runtime:subscribe(spread, output),
     ok = ari_concurrent_runtime:push(spread, input, 0, [a, b, c, d]),
     Traced = [{Item, ari_crt_worker:index(Pid)} || {{Item, Pid}, _Time} <- receive_n(4, spread, output)],
     ?assertEqual([{a, 1}, {b, 2}, {c, 1}, {d, 2}], lists:keysort(1, Traced)),
@@ -112,7 +137,7 @@ the_items_are_spread_over_the_workers_in_turn_test() ->
 
 a_worker_keeps_the_order_of_its_items_test() ->
     Sup = start(ordered, tracing(), 2),
-    ok = ari_concurrent_runtime:subscribe(ordered, output),
+    {_, _} = ari_concurrent_runtime:subscribe(ordered, output),
     ok = ari_concurrent_runtime:push(ordered, input, 0, [a, b, c, d]),
     Traced = [{Item, ari_crt_worker:index(Pid)} || {{Item, Pid}, _Time} <- receive_n(4, ordered, output)],
     ?assertEqual([a, c], [Item || {Item, 1} <- Traced]),
@@ -121,7 +146,7 @@ a_worker_keeps_the_order_of_its_items_test() ->
 
 a_long_queue_is_delivered_over_several_rounds_test() ->
     Sup = start(long, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(long, output),
+    {_, _} = ari_concurrent_runtime:subscribe(long, output),
     Items = lists:seq(1, 2500),
     ok = ari_concurrent_runtime:push(long, input, 0, Items),
     ?assertEqual(Items, [Item || {Item, _Time} <- receive_n(2500, long, output)]),
@@ -129,7 +154,7 @@ a_long_queue_is_delivered_over_several_rounds_test() ->
 
 a_worker_takes_in_what_came_while_it_was_busy_as_one_round_test() ->
     Sup = start(busy, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(busy, output),
+    {_, _} = ari_concurrent_runtime:subscribe(busy, output),
     [Worker] = pg:get_local_members(busy, workers),
     [Coordinator] = pg:get_local_members(busy, coordinator),
     ok = sys:suspend(Worker),
@@ -147,7 +172,7 @@ a_worker_closes_a_round_that_ran_out_of_steps_whatever_is_waiting_test() ->
     %% Every item takes two steps through the chain; the pushes
     %% waiting make 3000 steps, three rounds of a thousand.
     Sup = start(rounds, chain(), 1),
-    ok = ari_concurrent_runtime:subscribe(rounds, output),
+    {_, _} = ari_concurrent_runtime:subscribe(rounds, output),
     [Worker] = pg:get_local_members(rounds, workers),
     [Coordinator] = pg:get_local_members(rounds, coordinator),
     ok = sys:suspend(Worker),
@@ -166,7 +191,7 @@ a_worker_closes_a_round_that_ran_out_of_steps_whatever_is_waiting_test() ->
 
 a_push_waits_while_the_messages_on_their_way_are_at_the_limit_test() ->
     Sup = start(limited, chain(), #{workers => 1, max_in_flight => 2}),
-    ok = ari_concurrent_runtime:subscribe(limited, output),
+    {_, _} = ari_concurrent_runtime:subscribe(limited, output),
     [Worker] = pg:get_local_members(limited, workers),
     ok = sys:suspend(Worker),
     ok = ari_concurrent_runtime:push(limited, input, 0, [a, b]),
@@ -181,7 +206,7 @@ a_push_waits_while_the_messages_on_their_way_are_at_the_limit_test() ->
 
 the_pushes_waiting_are_taken_in_the_order_made_test() ->
     Sup = start(lined_up, chain(), #{workers => 1, max_in_flight => 1}),
-    ok = ari_concurrent_runtime:subscribe(lined_up, output),
+    {_, _} = ari_concurrent_runtime:subscribe(lined_up, output),
     [Worker] = pg:get_local_members(lined_up, workers),
     ok = sys:suspend(Worker),
     ok = ari_concurrent_runtime:push(lined_up, input, 0, [a]),
@@ -247,7 +272,7 @@ a_worker_outgrowing_the_heap_allowed_stops_the_branch_test() ->
 
 the_items_of_a_partitioned_input_go_to_the_worker_of_their_key_test() ->
     Sup = start(keyed_input, tracing_keyed_input(), 3),
-    ok = ari_concurrent_runtime:subscribe(keyed_input, output),
+    {_, _} = ari_concurrent_runtime:subscribe(keyed_input, output),
     Items = lists:seq(1, 20),
     ok = ari_concurrent_runtime:push(keyed_input, input, 0, Items),
     Traced = [{Item, ari_crt_worker:index(Pid)} || {{Item, Pid}, _Time} <- receive_n(20, keyed_input, output)],
@@ -256,7 +281,7 @@ the_items_of_a_partitioned_input_go_to_the_worker_of_their_key_test() ->
 
 the_items_of_a_partitioned_edge_are_handed_to_the_worker_of_their_key_test() ->
     Sup = start(keyed_edge, tracing_keyed_edge(), 3),
-    ok = ari_concurrent_runtime:subscribe(keyed_edge, output),
+    {_, _} = ari_concurrent_runtime:subscribe(keyed_edge, output),
     Items = lists:seq(1, 20),
     ok = ari_concurrent_runtime:push(keyed_edge, input, 0, Items),
     Traced = [{Item, ari_crt_worker:index(Pid)} || {{{Item, _}, Pid}, _Time} <- receive_n(20, keyed_edge, output)],
@@ -265,7 +290,7 @@ the_items_of_a_partitioned_edge_are_handed_to_the_worker_of_their_key_test() ->
 
 the_items_handed_over_by_a_worker_keep_their_order_test() ->
     Sup = start(handed, tracing_keyed_edge(), 3),
-    ok = ari_concurrent_runtime:subscribe(handed, output),
+    {_, _} = ari_concurrent_runtime:subscribe(handed, output),
     Items = lists:seq(1, 30),
     ok = ari_concurrent_runtime:push(handed, input, 0, Items),
     %% Every item, with the worker it came up on and the worker it
@@ -284,7 +309,7 @@ the_items_handed_over_by_a_worker_keep_their_order_test() ->
 
 the_items_handed_over_are_counted_before_they_are_delivered_test() ->
     Sup = start(handed_counted, counting_keyed_edge(), 3),
-    ok = ari_concurrent_runtime:subscribe(handed_counted, output),
+    {_, _} = ari_concurrent_runtime:subscribe(handed_counted, output),
     Items = [1, 1, 1, 1, 2, 2, 3],
     ok = ari_concurrent_runtime:push(handed_counted, input, 0, Items),
     ok = ari_concurrent_runtime:close(handed_counted, input, 0),
@@ -300,7 +325,7 @@ the_items_handed_over_are_counted_before_they_are_delivered_test() ->
 
 a_notification_waits_for_the_epoch_to_close_test() ->
     Sup = start(waiting, counting(), 1),
-    ok = ari_concurrent_runtime:subscribe(waiting, output),
+    {_, _} = ari_concurrent_runtime:subscribe(waiting, output),
     ok = ari_concurrent_runtime:push(waiting, input, 0, [a, b, c]),
     settle(waiting),
     ?assertEqual(nothing, receive_any(waiting, output)),
@@ -310,7 +335,7 @@ a_notification_waits_for_the_epoch_to_close_test() ->
 
 every_worker_counts_the_items_it_was_given_test() ->
     Sup = start(counted, counting(), 2),
-    ok = ari_concurrent_runtime:subscribe(counted, output),
+    {_, _} = ari_concurrent_runtime:subscribe(counted, output),
     ok = ari_concurrent_runtime:push(counted, input, 0, [a, b, c, d, e]),
     ok = ari_concurrent_runtime:close(counted, input, 0),
     T = ari_vtime:new(0),
@@ -319,7 +344,7 @@ every_worker_counts_the_items_it_was_given_test() ->
 
 the_epochs_are_notified_in_order_test() ->
     Sup = start(epochs, counting(), 1),
-    ok = ari_concurrent_runtime:subscribe(epochs, output),
+    {_, _} = ari_concurrent_runtime:subscribe(epochs, output),
     ok = ari_concurrent_runtime:push(epochs, input, 1, [a, b]),
     ok = ari_concurrent_runtime:push(epochs, input, 0, [c]),
     ok = ari_concurrent_runtime:close(epochs, input, 1),
@@ -328,7 +353,7 @@ the_epochs_are_notified_in_order_test() ->
 
 an_epoch_left_open_keeps_the_later_ones_from_completing_test() ->
     Sup = start(held, counting(), 1),
-    ok = ari_concurrent_runtime:subscribe(held, output),
+    {_, _} = ari_concurrent_runtime:subscribe(held, output),
     ok = ari_concurrent_runtime:push(held, input, 0, [a]),
     ok = ari_concurrent_runtime:push(held, input, 1, [b]),
     ok = ari_concurrent_runtime:close(held, input, 0),

@@ -197,7 +197,7 @@ single_action({close, Epoch}, Runtime) ->
 collector(Parent, Shape) ->
     spawn_link(fun() ->
         _ = process_flag(message_queue_data, off_heap),
-        ok = ari_concurrent_runtime:subscribe(?NAME, output),
+        {_, _} = ari_concurrent_runtime:subscribe(?NAME, output),
         Parent ! {subscribed, self()},
         collect(Parent, Shape, #{}, 0, undefined)
     end),
