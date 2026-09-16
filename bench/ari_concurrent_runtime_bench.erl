@@ -54,7 +54,9 @@
     scaling/1,
     workers/0,
     spread/3,
-    profile/2
+    profile/2,
+    watcher/1,
+    unwatch/1
 ]).
 
 -type shape() :: pipeline | exchange | epochs | stream | loop.

@@ -670,3 +670,41 @@ unchanged: on one worker `pipeline {4,100000}` 205 ms, `exchange`
 219, `epochs {1000,100}` 86, `loop {1000,100}` 53; on eight
 `pipeline` 52, `exchange` 65, `epochs` 51, `loop` 24, and on
 sixteen `pipeline` 44, `exchange` 70.
+
+## Soak baseline
+
+The random soak at seed `{17,23,42}` compared 10 000 and 100 000
+pushes of batches from 1 to 16 items over a window of eight open
+epochs. Every shape ran with four workers, `max_in_flight` 1000, a
+pipeline depth of four and a loop limit of ten. The long trace had
+24 756 closes and 848 297 items; the short prefix had 2 455 closes
+and 84 947 items.
+
+```
+rebar3 as bench compile
+erl -noshell -pa _build/bench/lib/ariadne/ebin \
+    _build/bench/lib/ariadne/bench _build/bench/lib/ariadne/test \
+    -eval 'lists:foreach(fun(S) -> ari_concurrent_runtime_soak:run(#{seed => {17,23,42}, shape => S, workers => 4, pushes => 100000, batch => 16, window => 8, depth => 4, loop_limit => 10, max_in_flight => 1000, timeout => 120000}) end, [pipeline,exchange,counting,loop]).' \
+    -s init stop
+```
+
+`elapsed` is the concurrent feed and drain in milliseconds. Heap and
+final sizes are KB; the worker columns are the largest of the four.
+
+```
+shape      length  elapsed  worker peak  coord peak  coord mailbox  worker final  coord final  verdict
+pipeline   short       258          277         191              2            21           21  PASS
+pipeline   long       2432          415         191              4            21           21  PASS
+exchange   short       251          672         725              4            21           21  PASS
+exchange   long       2654          725         725              7            21           21  PASS
+counting   short       266          138         309              4             3            3  PASS
+counting   long       2645          138         309              4             3            3  PASS
+loop       short       224          191         138              2             5            5  PASS
+loop       long       2267          277         191              4             5            5  PASS
+```
+
+Every output matched the single runtime. After the last close the
+coordinator had no pending pointstamps, frontiers, notifications or
+waiting pushes, and `in_flight` was zero. The retained sizes after a
+full collection were unchanged at ten times the work; the heap peaks
+stayed within one allocation step.
