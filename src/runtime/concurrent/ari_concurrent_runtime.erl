@@ -157,6 +157,11 @@ close(Name, Input, Epoch) ->
 %% runtime `Name': every item leaving the graph through the output
 %% is sent to it as `{ariadne, Name, Output, Message, Time}'. Items
 %% of an output nobody is subscribed to are dropped.
+%%
+%% A subscriber to an output of many items is to keep its mailbox
+%% off its heap (see the process flag `message_queue_data'): a
+%% process a few thousand messages behind copies them all at every
+%% collection of its heap and falls further behind.
 %% @end
 %%--------------------------------------------------------------------
 -spec subscribe(Name :: atom(), Output :: atom()) -> ok.

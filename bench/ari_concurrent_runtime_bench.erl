@@ -13,8 +13,9 @@
 %%% <li>`pipeline' -- a chain of `K' passing vertices fed `M' messages
 %%% of one epoch: the cost of delivering a message;</li>
 %%% <li>`exchange' -- the same chain with every edge partitioned by
-%%% the message, so that a message changes workers at every hop:
-%%% the cost of handing a message to another worker;</li>
+%%% the message and the edge, so that a message is hashed anew at
+%%% every hop and changes workers at most of them: the cost of
+%%% handing a message to another worker;</li>
 %%% <li>`epochs' -- a counting vertex fed `E' epochs of `M' messages,
 %%% every epoch closed at the end: the cost of notifications;</li>
 %%% <li>`stream' -- the counting vertex fed `E' epochs of `M'
@@ -49,6 +50,7 @@
     scaling/0,
     scaling/1,
     workers/0,
+    spread/3,
     profile/2
 ]).
 
@@ -59,6 +61,8 @@
 -type stats() :: #{
     %% How long the producer spent in the pushes and the closes.
     fed := non_neg_integer(),
+    %% How long until the first item reached the subscriber.
+    first := non_neg_integer(),
     %% The share of the reductions of the branch made by the coordinator.
     share := float(),
     %% The longest mailbox of the coordinator seen.
@@ -144,6 +148,31 @@ workers() ->
 
 %%--------------------------------------------------------------------
 %% @doc
+%% Runs the load given on `Workers' workers `Repeats' times and
+%% prints every run on a line of its own, the fastest first: the
+%% time of the run, the time the producer spent feeding, the time
+%% until the first item reached the subscriber, and the time from
+%% then to the last one. For the runs out of the ordinary: where in
+%% a run the time went.
+%% @end
+%%--------------------------------------------------------------------
+-spec spread(load(), Workers :: pos_integer(), Repeats :: pos_integer()) -> ok.
+spread(Load, Workers, Repeats) ->
+    Results = lists:keysort(1, [timed(Load, Workers) || _ <- lists:seq(1, Repeats)]),
+    io:format("~8s ~8s ~8s ~8s ~8s ~8s~n", ["run ms", "fed ms", "first ms", "tail ms", "wrk KB", "coord KB"]),
+    lists:foreach(
+        fun({Micros, Stats}) ->
+            #{fed := Fed, first := First, worker_peak := Wp, coordinator_peak := Cp} = Stats,
+            io:format(
+                "~8.1f ~8.1f ~8.1f ~8.1f ~8b ~8b~n",
+                [Micros / 1000, Fed / 1000, First / 1000, (Micros - First) / 1000, Wp div 1024, Cp div 1024]
+            )
+        end,
+        Results
+    ).
+
+%%--------------------------------------------------------------------
+%% @doc
 %% Profiles one run of the load given on `Workers' workers with
 %% `eprof' and prints the functions by the time spent in them, over
 %% the workers and the coordinator together.
@@ -210,7 +239,7 @@ timed(Load, Workers) ->
     Started = erlang:monotonic_time(microsecond),
     feed(Load),
     Fed = erlang:monotonic_time(microsecond),
-    Finished = await(Consumer),
+    {First, Finished} = await(Consumer),
     Sample1 = scheduler:sample(),
     After = reductions([Coordinator | WorkerPids]),
     Peaks = unwatch(Watcher),
@@ -218,6 +247,7 @@ timed(Load, Workers) ->
     [CoordinatorReductions | WorkerReductions] = lists:zipwith(fun erlang:'-'/2, After, Before),
     {Finished - Started, #{
         fed => Fed - Started,
+        first => First - Started,
         share => CoordinatorReductions / lists:sum([CoordinatorReductions | WorkerReductions]),
         mailbox => maps:get({mailbox, Coordinator}, Peaks),
         worker_peak => lists:max([maps:get({heap, W}, Peaks) || W <- WorkerPids]),
@@ -239,7 +269,9 @@ reductions(Pids) ->
 %%% processes of the branch, folding them into the largest heap of
 %%% every one -- the blocks allocated, the largest seen at a
 %%% collection or at the end -- and sampling their mailboxes every
-%%% few milliseconds, keeping the longest.
+%%% few milliseconds on a timer of its own, keeping the longest. The
+%%% timer is a message the watcher sends itself, so that the trace
+%%% messages, however many, cannot put the sampling off.
 %%%-------------------------------------------------------------------
 
 -type peaks() :: #{{heap | mailbox, pid()} => non_neg_integer()}.
@@ -249,6 +281,7 @@ watcher(Pids) ->
     Watcher = spawn_link(fun() ->
         receive go -> ok end,
         Peaks = maps:from_list([{{heap, P}, 0} || P <- Pids] ++ [{{mailbox, P}, 0} || P <- Pids]),
+        _ = erlang:send_after(?SAMPLE_MS, self(), sample),
         watch(Pids, Peaks)
     end),
     [1 = erlang:trace(Pid, true, [garbage_collection, {tracer, Watcher}]) || Pid <- Pids],
@@ -267,11 +300,12 @@ watch(Pids, Peaks) ->
             Heap = proplists:get_value(heap_block_size, Info, 0) +
                 proplists:get_value(old_heap_block_size, Info, 0),
             watch(Pids, larger({heap, Pid}, Heap * erlang:system_info(wordsize), Peaks));
+        sample ->
+            _ = erlang:send_after(?SAMPLE_MS, self(), sample),
+            watch(Pids, sample(Pids, Peaks));
         {stop, From} ->
             [erlang:trace(Pid, false, [garbage_collection]) || Pid <- Pids],
             From ! {peaks, sample(Pids, sample_heaps(Pids, Peaks))}
-    after ?SAMPLE_MS ->
-        watch(Pids, sample(Pids, Peaks))
     end.
 
 -spec sample([pid()], peaks()) -> peaks().
@@ -332,15 +366,21 @@ workers_of() ->
     pg:get_local_members(?NAME, workers).
 
 %% A process subscribed to the output, counting the items of the
-%% load down and reporting when it received the last one.
+%% load down and reporting when it received the first one and the
+%% last one.
 -spec consumer(load(), Workers :: pos_integer()) -> pid().
 consumer(Load, Workers) ->
     Self = self(),
     Consumer = spawn_link(fun() ->
+        %% A mailbox of a hundred thousand items on the heap would
+        %% be copied by every collection.
+        _ = process_flag(message_queue_data, off_heap),
         ok = ari_concurrent_runtime:subscribe(?NAME, output),
         Self ! {subscribed, self()},
-        consume(outputs(Load, Workers)),
-        Self ! {consumed, self(), erlang:monotonic_time(microsecond)}
+        consume(1),
+        First = erlang:monotonic_time(microsecond),
+        consume(outputs(Load, Workers) - 1),
+        Self ! {consumed, self(), First, erlang:monotonic_time(microsecond)}
     end),
     receive {subscribed, Consumer} -> ok end,
     Consumer.
@@ -351,9 +391,10 @@ consume(0) ->
 consume(N) ->
     receive {ariadne, ?NAME, output, _Message, _Time} -> consume(N - 1) end.
 
--spec await(pid()) -> Micros :: integer().
+%% The times the first item and the last one reached the consumer.
+-spec await(pid()) -> {First :: integer(), Last :: integer()}.
 await(Consumer) ->
-    receive {consumed, Consumer, Finished} -> Finished end.
+    receive {consumed, Consumer, First, Finished} -> {First, Finished} end.
 
 %%%-------------------------------------------------------------------
 %%% The loads
@@ -381,9 +422,12 @@ opts(_Load, Workers) ->
 
 -spec graph(load()) -> #graph{}.
 graph({pipeline, {K, _M}}) ->
-    chain(K, #{});
+    chain(K, fun(_I) -> #{} end);
 graph({exchange, {K, _M}}) ->
-    chain(K, #{key => fun(N) -> N end});
+    %% The key takes the edge in, so that one and the same message
+    %% hashes to a different worker at every hop; a key of the
+    %% message alone would keep it on one worker after the first.
+    chain(K, fun(I) -> #{key => fun(N) -> {I, N} end} end);
 graph({epochs, _}) ->
     counting();
 graph({stream, _}) ->
@@ -398,15 +442,17 @@ graph({loop, {L, _M}}) ->
         ari_graph:out(output, {inc, done})
     ]).
 
-%% A chain of `K' passing vertices, its edges with the options given.
--spec chain(pos_integer(), edge_opts()) -> #graph{}.
+%% A chain of `K' passing vertices, the edge into vertex `I' with
+%% the options `Opts(I)'.
+-spec chain(pos_integer(), fun((pos_integer()) -> edge_opts())) -> #graph{}.
 chain(K, Opts) ->
     Vertices = [list_to_atom("pass" ++ integer_to_list(I)) || I <- lists:seq(1, K)],
     Pairs = lists:zip(lists:droplast(Vertices), tl(Vertices)),
     ari_graph:graph(
         [ari_graph:in(input, {hd(Vertices), in})] ++
         [ari_graph:node(V, ari_test_pass, []) || V <- Vertices] ++
-        [ari_graph:edge(list_to_atom("to_" ++ atom_to_list(B)), {A, out}, {B, in}, Opts) || {A, B} <- Pairs] ++
+        [ari_graph:edge(list_to_atom("to_" ++ atom_to_list(B)), {A, out}, {B, in}, Opts(I))
+         || {I, {A, B}} <- lists:enumerate(2, Pairs)] ++
         [ari_graph:out(output, {lists:last(Vertices), out})]
     ).
 

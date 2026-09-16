@@ -13,20 +13,32 @@
 %%% start, and the processes of the others once the coordinator
 %%% wires the runtime, see {@link wire/3}.
 %%%
-%%% The worker works in rounds. A round is started by the items the
+%%% The worker works in rounds. A round is opened by the items the
 %%% coordinator feeds it (see {@link feed/4}), the items another
 %%% worker sends it (see {@link exchange/2}) or a notification the
 %%% coordinator tells it to deliver (see {@link notify/3}): the
-%%% worker delivers the event and then the messages of its queue
-%%% until the queue is empty or the round has run for as many steps
-%%% as it is allowed to; then it reports the deltas of the round to
-%%% the coordinator as one delta, sends the messages its engine put
-%%% in the outbox (see {@link ari_engine:outbox/1}) to the workers
-%%% of the copies they belong to, and sends the items that left the
-%%% graph in the round to the subscribers of the outputs, as
-%%% `{ariadne, Name, Output, Message, Time}'. A round cut short is
-%%% followed by another one, once whatever else the worker was told
-%%% meanwhile is taken care of.
+%%% worker takes the event and delivers the messages of its queue
+%%% until the round has run for as many steps as it is allowed to.
+%%% Whenever the queue runs empty before that, the worker goes back
+%%% to its mailbox for whatever it was told meanwhile -- more items,
+%%% more notifications -- and takes that into the same round; the
+%%% round is closed once the mailbox is empty too. Closing a round
+%%% is reporting the deltas of the round to the coordinator as one
+%%% sum, sending the messages the engine put in the outbox (see
+%%% {@link ari_engine:outbox/1}) to the workers of the copies they
+%%% belong to, and sending the items that left the graph in the
+%%% round to the subscribers of the outputs, as `{ariadne, Name,
+%%% Output, Message, Time}'. A round that ran out of steps is closed
+%%% and followed by another one, once whatever else the worker was
+%%% told meanwhile is taken care of.
+%%%
+%%% The mailbox being empty is told by the timeout of the server
+%%% loop: a timeout of zero fires only when there is no message
+%%% waiting. Taking in what came meanwhile keeps the rounds long
+%%% under load: were a round to close with the queue, every batch of
+%%% items sent by another worker would make a round of its own, and
+%%% the batches, each a slice of a round's outbox, would shrink from
+%%% worker to worker, and the rounds and the reports with them.
 %%%
 %%% Whatever is put on the way to the worker is counted before it is
 %%% sent -- the items of a push by the coordinator, the messages of
@@ -44,6 +56,7 @@
 -module(ari_crt_worker).
 
 -behaviour(gen_server).
+
 
 -export([
     start_link/5,
@@ -72,7 +85,9 @@
     engine :: ari_engine:t(),
     outputs :: [atom()],
     coordinator :: pid() | undefined,
-    workers :: tuple() | undefined
+    workers :: tuple() | undefined,
+    %% The sum of the deltas of the round open, not reported yet.
+    sum = #{} :: ari_progress:sum()
 }).
 
 %%--------------------------------------------------------------------
@@ -160,26 +175,20 @@ init({Name, Index, Count, Plan}) ->
 
 %% @private
 handle_call(index, _From, #worker{index = Index} = Worker) ->
-    {reply, Index, Worker}.
+    {reply, Index, Worker, 0}.
 
 %% @private
 handle_cast({wire, Coordinator, Workers}, Worker) ->
-    {noreply, Worker#worker{coordinator = Coordinator, workers = Workers}};
-handle_cast({feed, Input, Time, Messages}, #worker{engine = Engine} = Worker) ->
-    Engine2 = ari_engine:accept([{Input, Message, Time} || Message <- Messages], Engine),
-    {noreply, round(Worker#worker{engine = Engine2}, {[], []})};
-handle_cast({exchange, Events}, #worker{engine = Engine} = Worker) ->
-    Engine2 = ari_engine:accept(Events, Engine),
-    {noreply, round(Worker#worker{engine = Engine2}, {[], []})};
-handle_cast({notify, Vertex, Time}, #worker{engine = Engine} = Worker) ->
-    {Engine2, Delta} = ari_engine:notify(Vertex, Time, Engine),
-    {noreply, round(Worker#worker{engine = Engine2}, Delta)};
-handle_cast(round, Worker) ->
-    {noreply, round(Worker, {[], []})}.
+    {noreply, Worker#worker{coordinator = Coordinator, workers = Workers}, 0};
+handle_cast(Told, Worker) ->
+    go(take(Told, Worker)).
 
 %% @private
+%% The timeout fires once the mailbox is empty, see go/1.
+handle_info(timeout, Worker) ->
+    {noreply, close(Worker)};
 handle_info(_Message, Worker) ->
-    {noreply, Worker}.
+    {noreply, Worker, 0}.
 
 %% @private
 terminate(_Reason, #worker{engine = Engine}) ->
@@ -191,12 +200,55 @@ terminate(_Reason, #worker{engine = Engine}) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Runs a round started with the delta `Delta': delivers the messages
-%% of the queue, reports the deltas of the round as one sum (see
-%% {@link ari_progress:sum/2}), sends the messages of the outbox to
-%% the workers they belong to and sends the items that left the
-%% graph to the subscribers. If the round is cut short, another one
-%% is asked for.
+%% Takes what the worker was told into the round: queues the items
+%% fed or sent, delivers the notification, adding its delta to the
+%% sum of the round.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec take(Told :: term(), #worker{}) -> #worker{}.
+take({feed, Input, Time, Messages}, #worker{engine = Engine} = Worker) ->
+    Worker#worker{engine = ari_engine:accept([{Input, Message, Time} || Message <- Messages], Engine)};
+take({exchange, Events}, #worker{engine = Engine} = Worker) ->
+    Worker#worker{engine = ari_engine:accept(Events, Engine)};
+take({notify, Vertex, Time}, #worker{engine = Engine, sum = Sum} = Worker) ->
+    {Engine2, Delta} = ari_engine:notify(Vertex, Time, Engine),
+    Worker#worker{engine = Engine2, sum = ari_progress:sum(Delta, Sum)};
+take(round, Worker) ->
+    Worker.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Goes on with the round: delivers up to `ROUND' messages of the
+%% queue. If the steps run out, closes the round and asks for
+%% another one; if the queue runs empty, returns to the server loop
+%% with a timeout of zero, to take in whatever is in the mailbox and
+%% close the round once nothing is.
+%%
+%% Every callback returns with the timeout, whether or not a round
+%% is open: closing a round with nothing in it costs nothing.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec go(#worker{}) -> {noreply, #worker{}} | {noreply, #worker{}, 0}.
+go(Worker) ->
+    case steps(?ROUND, Worker) of
+        {Worker2, true} ->
+            Worker3 = close(Worker2),
+            gen_server:cast(self(), round),
+            {noreply, Worker3};
+        {Worker2, false} ->
+            {noreply, Worker2, 0}
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Closes the round: reports its sum to the coordinator (see {@link
+%% ari_progress:sum/2}), sends the messages of the outbox to the
+%% workers they belong to and sends the items that left the graph to
+%% the subscribers.
 %%
 %% The report goes out before the outbox does, so that the
 %% coordinator counts a message before the worker it goes to can
@@ -205,34 +257,30 @@ terminate(_Reason, #worker{engine = Engine}) ->
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec round(#worker{}, ari_progress:delta()) -> #worker{}.
-round(#worker{coordinator = Coordinator} = Worker, Delta) ->
-    {Worker2, Sum, Exhausted} = steps(?ROUND, Worker, ari_progress:sum(Delta, #{})),
+-spec close(#worker{}) -> #worker{}.
+close(#worker{coordinator = Coordinator, sum = Sum} = Worker) ->
     map_size(Sum) =:= 0 orelse ari_crt_coordinator:report(Coordinator, self(), Sum),
-    Worker3 = publish(exchange(Worker2)),
-    Exhausted andalso gen_server:cast(self(), round),
-    Worker3.
+    publish(exchange(Worker#worker{sum = #{}})).
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Delivers up to `Steps' messages of the queue, adding their deltas
-%% to the sum `Sum', until the queue is empty. Tells whether the
-%% steps ran out before the queue did.
+%% to the sum of the round, until the queue is empty. Tells whether
+%% the steps ran out before the queue did.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec steps(Steps :: non_neg_integer(), #worker{}, ari_progress:sum()) ->
-    {#worker{}, ari_progress:sum(), Exhausted :: boolean()}.
-steps(0, Worker, Sum) ->
-    {Worker, Sum, true};
-steps(Steps, #worker{engine = Engine} = Worker, Sum) ->
+-spec steps(Steps :: non_neg_integer(), #worker{}) -> {#worker{}, Exhausted :: boolean()}.
+steps(0, Worker) ->
+    {Worker, true};
+steps(Steps, #worker{engine = Engine, sum = Sum} = Worker) ->
     case ari_engine:dequeue(Engine) of
         {Event, Engine2} ->
             {Engine3, Delta} = ari_engine:deliver(Event, Engine2),
-            steps(Steps - 1, Worker#worker{engine = Engine3}, ari_progress:sum(Delta, Sum));
+            steps(Steps - 1, Worker#worker{engine = Engine3, sum = ari_progress:sum(Delta, Sum)});
         empty ->
-            {Worker, Sum, false}
+            {Worker, false}
     end.
 
 %%--------------------------------------------------------------------

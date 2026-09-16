@@ -127,6 +127,22 @@ a_long_queue_is_delivered_over_several_rounds_test() ->
     ?assertEqual(Items, [Item || {Item, _Time} <- receive_n(2500, long, output)]),
     stop(Sup).
 
+a_worker_takes_in_what_came_while_it_was_busy_as_one_round_test() ->
+    Sup = start(busy, chain(), 1),
+    ok = ari_concurrent_runtime:subscribe(busy, output),
+    [Worker] = pg:get_local_members(busy, workers),
+    [Coordinator] = pg:get_local_members(busy, coordinator),
+    ok = sys:suspend(Worker),
+    ok = ari_concurrent_runtime:push(busy, input, 0, [a, b]),
+    ok = ari_concurrent_runtime:push(busy, input, 0, [c]),
+    ok = ari_concurrent_runtime:push(busy, input, 0, [d, e]),
+    1 = erlang:trace(Coordinator, true, ['receive']),
+    ok = sys:resume(Worker),
+    T = ari_vtime:new(0),
+    ?assertEqual([{a, T}, {b, T}, {c, T}, {d, T}, {e, T}], receive_n(5, busy, output)),
+    ?assertEqual(1, length(receive_reports(Coordinator))),
+    stop(Sup).
+
 %%%===================================================================
 %%% The limit
 %%%===================================================================
@@ -360,6 +376,16 @@ receive_all(Tag) ->
     receive
         {Tag, Value} -> [Value | receive_all(Tag)]
     after 0 ->
+        []
+    end.
+
+%% The reports of the workers the coordinator `Coordinator' received
+%% so far, as traced.
+receive_reports(Coordinator) ->
+    receive
+        {trace, Coordinator, 'receive', {'$gen_cast', {delta, _Worker, _Sum}} = Report} ->
+            [Report | receive_reports(Coordinator)]
+    after 100 ->
         []
     end.
 

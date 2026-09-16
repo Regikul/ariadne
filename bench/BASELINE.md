@@ -377,3 +377,157 @@ Left as they are:
   push. The price of small pushes, item 4 of the baseline, unchanged.
 - `loop` on one worker showed 58–90 ms across runs in this session
   against 56–58 before; the spread is the machine's.
+
+## The quality of the parallelism
+
+Against an ideal with no coordination at all -- W single runtimes run
+at once in processes of their own, each on a W-th of the items,
+loaded before the clock -- `pipeline {4,100000}` with 8 schedulers:
+
+```
+W                       1      2      4      8
+independent singles   196    108     53     38   ms, the slowest of W
+concurrent runtime    197    114     74     66   ms
+gap                     0      6     21     28   ms
+```
+
+Of the 28 ms at 8 workers, 9 are the push (the singles are loaded
+outside of the clock) and some 15 the 100 000 items sent one by one to
+one subscriber (the singles keep theirs in a list); the protocol of
+rounds, deltas and notifications is the rest, about 4 ms, in line with
+the coordinator's 0.9 % of the reductions. On a large push the
+coordination costs nothing to speak of; the serial entry and exit do.
+
+On small pushes the coordination is the cost: a push turns into W
+feeds, W deltas, and for an epoch W notifications and W deltas more --
+4W messages through the coordinator whatever the number of items. The
+same 100 000 items in pushes of 100, 1000 and 10 000:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+epochs    {1000,100}           1    101000      81.5     76.6..87.6    0.81     8.7   12.8       0     8993     1088   1.1
+epochs    {100,1000}           1    100100      57.4     54.1..59.4    0.57     4.3    4.2       0     9345      362   1.0
+epochs    {10,10000}           1    100010      55.6     54.4..64.5    0.56     5.8    3.7       0    15268     1899   0.9
+epochs    {1000,100}           8    108000      75.0     68.3..89.7    0.69    57.1   27.9       0     1088     2862   3.3
+epochs    {100,1000}           8    100800      20.9     18.1..21.9    0.21    10.8    7.8       0     1088      501   5.7
+epochs    {10,10000}           8    100080      15.1     14.3..15.4    0.15    11.8    4.5       0     1173     3435   6.1
+stream    {1000,100,1000}      1    101000      92.0    88.1..105.1    0.91    87.4   13.1       0      725     1088   1.3
+stream    {100,1000,10000}     1    100100      75.2     64.2..88.9    0.75    68.2    4.4       0     1899      362   1.1
+stream    {10,10000,100000}    1    100010      50.6     40.5..65.2    0.51     5.6    3.8       0    17517     2485   0.9
+stream    {1000,100,1000}      8    108000      74.4     73.1..82.1    0.69    74.4   28.4       0      105      138   3.2
+stream    {100,1000,10000}     8    100800      22.2     19.4..24.2    0.22    17.4    8.0       0      415      501   5.9
+stream    {10,10000,100000}    8    100080      16.1     14.7..18.0    0.16    12.2    4.4       0     1173     3435   6.0
+```
+
+At 8 workers a push of 100 items costs 75 µs whatever it carries,
+about 9 µs per worker fed; a push of 1000 brings the coordinator down
+to 8 % and a push of 10 000 to 4.5 %. The rule of thumb: a push of a
+hundred items per worker or more keeps the coordination under a tenth.
+
+A lever exists and is a matter of design, not of tuning: a push
+smaller than that could be handed to one worker rather than dealt in
+turn over all of them, at 4 messages instead of 4W. It changes what
+`push/4` promises about the spread and is not done here.
+
+## Corrections after a review
+
+Three things above were wrong, found by a review of the bench:
+
+1. **`exchange` measured no exchange.** Its edges were all keyed by
+   the message itself, so a message hashed to one and the same worker
+   at every hop and changed workers once at most. The claim that
+   handing a message to another worker is nearly free rested on it
+   and is withdrawn. The key now takes the edge in, and a message is
+   hashed anew at every hop.
+2. **The `mailbox` column sampled nothing.** The watcher sampled on
+   the `after` of a `receive` that every trace message restarted, so
+   under frequent collections it sampled only at the end. It samples
+   on a timer of its own now.
+3. **The outliers were the subscriber, not the machine.** Thirty runs
+   of `pipeline {4,100000}` on 8 workers, each split into the push,
+   the time to the first item at the subscriber, and the tail: the
+   push at 6–9 ms and the first item at 25–31 ms in every run, the
+   tail from 35 to 637 ms, half the runs slow. The bench's consumer
+   kept its mailbox on the heap, and a process a few thousand
+   messages behind copies them all at every collection and falls
+   further behind. With `message_queue_data` set to `off_heap` the
+   thirty runs are 49–78 ms, the tail 17–33; on 16 schedulers 16
+   workers run `pipeline` at 47 ms (44.6..57.6) and 32 workers at 41
+   ms. The bimodal runs at 16 schedulers and the advice to measure
+   with 8 were this and are withdrawn. A subscriber to a fast output
+   is to keep its mailbox off the heap.
+
+With the exchange measured, 8 schedulers:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+exchange  {4,100000}           1    400000     200.5   196.1..225.5    0.50     7.2    0.8       1    34491     6508   0.8
+exchange  {4,100000}           2    400000     133.5   130.9..155.9    0.33     4.9    0.9       1    21918     6509   1.5
+exchange  {4,100000}           4    400000      91.7     90.6..97.1    0.23     5.9    1.7       9     9345     8993   3.4
+exchange  {4,100000}           8    400000     111.8    92.4..158.9    0.28     7.2    5.5   13966    11831    17429   6.6
+exchange  {4,100000}          16    400000     138.7   114.0..157.8    0.35     7.6    3.4   84147     7462    27862   6.5
+```
+
+and on 16 schedulers, the consumer off the heap: 16 workers 121.9 ms
+(119.2..216.4) with the coordinator's mailbox at 83 000 and its heap
+at 31 MB; 32 workers 457.5 ms (133.1..2796.7), mailbox 147 000, heap
+109 MB. `pipeline` at the same points: 47 and 41 ms.
+
+The exchange costs, and the cost grows with the workers: the
+coordinator's mailbox tells that the deltas come by the tens of
+thousands, one per round, and the rounds have shrunk. A worker runs a
+round for every `exchange' it is sent, and once its own feed is
+delivered a round is as long as the batch that came in; a batch is a
+slice of another worker's outbox cut W − 1 ways, so the batches, and
+with them the rounds and the outboxes, shrink down the chain to a
+handful of events, each round reporting a delta. This is the runtime,
+not the bench, and is the next item.
+
+## After 4: a round takes in what came meanwhile
+
+A worker's round used to close with its queue, so once its own feed
+was delivered every batch sent by another worker made a round of its
+own, and the batches shrank down the chain. Now, whenever the queue
+runs empty within the budget of a round, the worker returns to its
+server loop with a timeout of zero, which fires only once the mailbox
+is empty: whatever was told meanwhile -- items fed or sent,
+notifications -- is taken into the same round, and the round is
+closed on the timeout. (A first cut drained the mailbox with a
+selective receive inside the round; the loop's timeout does the same
+with every message going through the loop, and measured the same.)
+16 schedulers, the consumer off the heap:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+exchange  {4,100000}           1    400000     218.2   202.8..226.5    0.55     7.3    0.8       1    23454     6508   0.9
+exchange  {4,100000}           2    400000     132.5   129.2..137.0    0.33     4.8    0.8       0    21918     6508   1.7
+exchange  {4,100000}           4    400000      90.1     86.9..93.6    0.23     7.2    0.8       0    10295     8993   3.0
+exchange  {4,100000}           8    400000      66.3     65.6..70.2    0.17     9.1    0.9       2    10295     6508   6.2
+exchange  {4,100000}          16    400000      70.0     68.0..97.3    0.17    13.1    1.0      77     8044     9378  10.0
+exchange  {4,100000}          32    400000      69.2     66.6..70.7    0.17    15.5    2.0     279     4971     9518  11.1
+pipeline  {4,100000}           1    400000     212.3   199.3..237.0    0.53     5.4    0.9       1    34491     6508   0.9
+pipeline  {4,100000}           2    400000     115.0   113.3..121.6    0.29     5.7    0.9       1    11857     6508   1.7
+pipeline  {4,100000}           4    400000      65.0     62.9..65.6    0.16     6.9    0.9       2     8044     6508   3.4
+pipeline  {4,100000}           8    400000      48.0     47.0..55.0    0.12     7.4    0.9       4     4608     6508   6.2
+pipeline  {4,100000}          16    400000      45.7     42.9..59.3    0.11    11.8    0.9       1     1899     9352   9.3
+pipeline  {4,100000}          32    400000      46.9     44.2..48.1    0.12    12.1    0.9      23     1088     9352  10.3
+epochs    {1000,100}           1    101000      93.6    89.3..100.9    0.93    10.4   11.4       0    17181     1760   1.0
+stream    {1000,100,1000}      1    101000      94.9    92.6..111.2    0.94    90.6   11.4       0      810     1088   1.1
+loop      {1000,100}           1    100100      65.0     53.4..69.1    0.65     0.1    0.2       1      191       15   1.1
+epochs    {1000,100}           8    108000      59.7     56.7..63.7    0.55    41.0   24.4      10     1760     3072   4.1
+stream    {1000,100,1000}      8    108000      72.1     66.9..73.8    0.67    70.9   25.8       7      191      418   3.5
+loop      {1000,100}           8    100100      21.2     18.7..29.3    0.21     1.2    0.3       2       65       65   6.6
+```
+
+`exchange` at 16 workers went from 139 to 70 ms and at 32 from 458 to
+69; the coordinator's mailbox from 83 000 and 147 000 to 77 and 279,
+its heap from 31 and 109 MB to 9 MB. The exchange now costs some 20
+ms over `pipeline` at 8 workers and more, the copying between the
+workers. `pipeline` gained too, 63 to 48 ms at 8 workers, as did
+`epochs`, 78 to 60: the notifications and the feeds waiting are taken
+into one round as well. The single-worker rows are unchanged.
+
+With the subscriber off the heap and the rounds whole, the runtime
+uses 16 and 32 workers on 16 schedulers as well as 8: `pipeline` at
+46–48 ms from 8 workers on, 4.4× of one worker, against the 5.2× of
+eight processes sharing nothing on this machine.
