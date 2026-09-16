@@ -57,6 +57,8 @@
 
 %% What one run of a load showed besides its time.
 -type stats() :: #{
+    %% How long the producer spent in the pushes and the closes.
+    fed := non_neg_integer(),
     %% The share of the reductions of the branch made by the coordinator.
     share := float(),
     %% The longest mailbox of the coordinator seen.
@@ -87,8 +89,9 @@ run() ->
 %% @doc
 %% Measures the loads given on `Workers' workers and prints a table:
 %% the number of steps, the median time of a run with its spread
-%% over the repetitions, the time of one step, the share of the
-%% reductions of the branch made by the coordinator, the longest
+%% over the repetitions, the time of one step, the time the producer
+%% spent in the pushes and the closes of the median run, the share
+%% of the reductions of the branch made by the coordinator, the longest
 %% mailbox of the coordinator seen, the peak heap of a worker and
 %% of the coordinator, and the number of schedulers busy on average.
 %% The share and the schedulers busy are those of the median run;
@@ -169,8 +172,8 @@ profile(Load, Workers) ->
 -spec header() -> ok.
 header() ->
     io:format(
-        "~-9s ~-18s ~3s ~9s ~9s ~14s ~7s ~6s ~7s ~8s ~8s ~5s~n",
-        ["shape", "params", "W", "steps", "run ms", "min..max ms", "us/step",
+        "~-9s ~-18s ~3s ~9s ~9s ~14s ~7s ~7s ~6s ~7s ~8s ~8s ~5s~n",
+        ["shape", "params", "W", "steps", "run ms", "min..max ms", "us/step", "fed ms",
          "coord%", "mailbox", "wrk KB", "coord KB", "busy"]
     ).
 
@@ -182,10 +185,10 @@ measure({Shape, Params} = Load, Workers) ->
     {Slowest, _} = lists:last(Results),
     Steps = steps(Load, Workers),
     io:format(
-        "~-9s ~-18s ~3b ~9b ~9.1f ~14s ~7.2f ~6.1f ~7b ~8b ~8b ~5.1f~n",
+        "~-9s ~-18s ~3b ~9b ~9.1f ~14s ~7.2f ~7.1f ~6.1f ~7b ~8b ~8b ~5.1f~n",
         [Shape, io_lib:format("~p", [Params]), Workers, Steps, Median / 1000,
          io_lib:format("~.1f..~.1f", [Fastest / 1000, Slowest / 1000]),
-         Median / Steps, 100 * maps:get(share, Stats),
+         Median / Steps, maps:get(fed, Stats) / 1000, 100 * maps:get(share, Stats),
          lists:max([maps:get(mailbox, S) || {_, S} <- Results]),
          lists:max([maps:get(worker_peak, S) || {_, S} <- Results]) div 1024,
          lists:max([maps:get(coordinator_peak, S) || {_, S} <- Results]) div 1024,
@@ -206,6 +209,7 @@ timed(Load, Workers) ->
     Sample0 = scheduler:sample(),
     Started = erlang:monotonic_time(microsecond),
     feed(Load),
+    Fed = erlang:monotonic_time(microsecond),
     Finished = await(Consumer),
     Sample1 = scheduler:sample(),
     After = reductions([Coordinator | WorkerPids]),
@@ -213,6 +217,7 @@ timed(Load, Workers) ->
     stop(Sup),
     [CoordinatorReductions | WorkerReductions] = lists:zipwith(fun erlang:'-'/2, After, Before),
     {Finished - Started, #{
+        fed => Fed - Started,
         share => CoordinatorReductions / lists:sum([CoordinatorReductions | WorkerReductions]),
         mailbox => maps:get({mailbox, Coordinator}, Peaks),
         worker_peak => lists:max([maps:get({heap, W}, Peaks) || W <- WorkerPids]),

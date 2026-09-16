@@ -242,7 +242,11 @@ take({_From, Input, Epoch, Messages}, #coordinator{progress = Progress} = Coordi
     case ari_progress:check_open(Input, Epoch, Progress) of
         ok ->
             Time = ari_vtime:new(Epoch),
-            Counted = ari_progress:apply({[], [{{edge, Input}, Time} || _ <- Messages]}, Progress),
+            Counted =
+                case length(Messages) of
+                    0 -> Progress;
+                    N -> ari_progress:apply(#{{{edge, Input}, Time} => N}, Progress)
+                end,
             Next = feed(Input, Time, Messages, Coordinator),
             {ok, Coordinator#coordinator{progress = Counted, next = Next}};
         {error, _Reason} = Error ->
@@ -287,24 +291,54 @@ admit(#coordinator{waiting = Waiting} = Coordinator) ->
 %%--------------------------------------------------------------------
 -spec feed(Input :: atom(), ari_vtime:t(), Messages :: [term()], #coordinator{}) -> pos_integer().
 feed(Input, Time, Messages, #coordinator{plan = Plan, workers = Workers, count = Count, next = Next}) ->
-    {Batches, Next2} = lists:foldl(
-        fun(Message, {Acc, N}) ->
-            {Worker, N2} = case ari_plan:partition(Plan, Input, Message, Count) of
-                undefined -> {N, N rem Count + 1};
-                Copy -> {Copy, N}
-            end,
-            {maps:update_with(Worker, fun(Ms) -> [Message | Ms] end, [Message], Acc), N2}
+    {Batches, Next2} =
+        case ari_plan:key(Plan, Input) of
+            undefined -> in_turn(Messages, Next, Count, erlang:make_tuple(Count, []));
+            _Key -> {by_key(Messages, Plan, Input, Count, #{}), Next}
         end,
-        {#{}, Next},
-        Messages
-    ),
     maps:foreach(
-        fun(N, Reversed) ->
-            ari_crt_worker:feed(element(N, Workers), Input, Time, lists:reverse(Reversed))
+        fun
+            (_N, []) -> ok;
+            (N, Reversed) -> ari_crt_worker:feed(element(N, Workers), Input, Time, lists:reverse(Reversed))
         end,
         Batches
     ),
     Next2.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Deals the items `Messages' to the `Count' workers one by one in
+%% turn, starting with worker `Next', each worker's items the latest
+%% first. Returns the items by the worker and the worker next in
+%% turn.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec in_turn(Messages :: [term()], Next :: pos_integer(), Count :: pos_integer(), tuple()) ->
+    {#{pos_integer() => [term()]}, pos_integer()}.
+in_turn([], Next, _Count, Dealt) ->
+    {maps:from_list(lists:zip(lists:seq(1, tuple_size(Dealt)), tuple_to_list(Dealt))), Next};
+in_turn([Message | Messages], Next, Count, Dealt) ->
+    Dealt2 = setelement(Next, Dealt, [Message | element(Next, Dealt)]),
+    in_turn(Messages, Next rem Count + 1, Count, Dealt2).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Deals the items `Messages' to the `Count' workers by their key,
+%% see {@link ari_plan:partition/4}, each worker's items the latest
+%% first.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec by_key(Messages :: [term()], ari_plan:t(), Input :: atom(), Count :: pos_integer(), Acc) ->
+    Acc when Acc :: #{pos_integer() => [term()]}.
+by_key([], _Plan, _Input, _Count, Dealt) ->
+    Dealt;
+by_key([Message | Messages], Plan, Input, Count, Dealt) ->
+    Worker = ari_plan:partition(Plan, Input, Message, Count),
+    by_key(Messages, Plan, Input, Count, Dealt#{Worker => [Message | maps:get(Worker, Dealt, [])]}).
 
 %%--------------------------------------------------------------------
 %% @doc

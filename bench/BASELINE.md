@@ -298,3 +298,82 @@ is to be read from the rows with 8 schedulers: `pipeline` and
 `exchange` reach 84–87 ms at 8 workers and more, with 4.7 schedulers
 busy, which is the serial part -- one push cutting 100 000 items and
 one subscriber taking them -- and stays item 3 of the list to look at.
+
+## After 3: the push counted as one and dealt through a tuple
+
+The bench got a column, `fed ms`: the time the producer spent in the
+pushes and the closes of the median run. On `pipeline {4,100000}` it
+was 30 ms at every number of workers -- the coordinator counting the
+100 000 items of the push one by one and dealing them through a map
+with a closure per item -- and the workers stood idle for those 30 ms
+before the first feed reached them. The push is now counted as one
+sum and dealt in turn through a tuple of one list per worker, by key
+through a map without closures.
+
+The plateau was looked into first. A probe timed the push, the first
+item at the subscriber and the last one, and sampled the subscriber's
+mailbox: it peaked at a few thousand of 100 000, so the subscriber
+keeps up. A graph ending in a counting vertex, one `done' per worker
+instead of 100 000 items, ran 71–82 ms at 8 workers against 86–97 with
+the items, so the 100 000 sends to one subscriber cost some 15 ms of
+the tail. What remained -- 8 workers taking 40 ms for the 50 000 steps
+each that one worker takes 20 ms for -- was checked against 8 single
+runtimes run at once in processes of their own, with nothing shared:
+19 ms alone, 28–43 ms each when eight run together. The slowdown per
+worker is the machine, the cores shared and the clock lower under
+load, not the runtime.
+
+8 schedulers, one worker:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step  fed ms coord% mailbox   wrk KB coord KB  busy
+pipeline  {4,1000}             1      4000       2.6       2.3..3.2    0.66     0.2    1.1       0      448      105   1.1
+pipeline  {4,100000}           1    400000     191.3   187.9..204.3    0.48     5.0    0.9       0    23454     6508   0.8
+exchange  {4,100000}           1    400000     191.4   189.3..196.9    0.48     4.2    0.8       0    23454     6508   0.8
+epochs    {1000,100}           1    101000      94.5     75.3..98.7    0.94     9.7   12.7       0     4971     1173   1.2
+stream    {1000,100,1000}      1    101000      82.5     81.3..85.2    0.82    78.1   13.2       0      725     1088   1.3
+loop      {1000,100}           1    100100      88.6     57.9..89.9    0.89     0.1    0.2       0      191       15   1.1
+```
+
+and over the workers:
+
+```
+pipeline  {4,100000}           1    400000     204.4   201.6..220.6    0.51     6.8    0.9       0    23454     6508   0.8
+pipeline  {4,100000}           2    400000     121.6   116.2..124.9    0.30     5.3    0.9       0    11857     6509   1.6
+pipeline  {4,100000}           4    400000      85.6     82.3..92.5    0.21     7.7    0.9       0     7457     6508   3.7
+pipeline  {4,100000}           8    400000      74.0     71.0..79.8    0.19     8.8    0.9       0     4971     8044   6.2
+pipeline  {4,100000}          16    400000      71.2    68.1..937.8    0.18    12.9    0.9       1     2848     9349   6.3
+exchange  {4,100000}           1    400000     190.8   186.9..216.5    0.48     5.4    0.8       0    23454     6508   0.8
+exchange  {4,100000}           2    400000     123.7   120.9..129.0    0.31     5.7    0.8       0    15980     6508   1.5
+exchange  {4,100000}           4    400000      81.0     79.9..84.6    0.20     6.1    0.9       0     9345     6508   3.1
+exchange  {4,100000}           8    400000      66.7    60.8..403.8    0.17     9.0    0.9       7     8993     8044   5.9
+exchange  {4,100000}          16    400000      61.3    59.4..298.1    0.15     9.8    1.2       9     4608     9360   6.2
+stream    {1000,100,1000}      1    101000      88.8     85.3..93.4    0.88    84.8   13.1       0      725     1088   1.3
+stream    {1000,100,1000}      2    102000      53.4     51.0..59.7    0.52    47.8   16.4       0      725     1760   2.4
+stream    {1000,100,1000}      4    104000      48.2     45.2..50.9    0.46    38.7   21.6       0      725     1765   3.8
+stream    {1000,100,1000}      8    108000      68.8     64.6..70.6    0.64    68.2   29.0       0      105      191   3.4
+stream    {1000,100,1000}     16    116000      89.8     88.6..90.7    0.77    89.7   35.7       0      40      138   3.3
+epochs    {1000,100}           1    101000      80.1     72.9..85.8    0.79     9.9   12.8       0     7457     1899   1.2
+epochs    {1000,100}           2    102000      50.5     45.3..52.3    0.50    11.7   16.0       0     2848     1760   2.3
+epochs    {1000,100}           4    104000      43.5     42.7..47.9    0.42    29.3   20.7       0     1088     1764   4.0
+epochs    {1000,100}           8    108000      67.0     64.9..68.7    0.62    48.1   27.9       0     1088     1768   3.5
+epochs    {1000,100}          16    116000     109.9   105.7..110.7    0.95    79.5   36.2       0     1088     2873   3.1
+```
+
+On one worker the concurrent runtime now runs `pipeline {4,100000}` at
+0.48 µs/step, as the single runtime does: the coordination costs
+nothing measurable on a large push. The push takes 5–13 ms instead of
+30, the coordinator's share is 0.9 %, its heap 6.5 MB. `pipeline` and
+`exchange` reach 61–74 ms at 8 and 16 workers, 2.9× of one worker on
+hardware that gives eight independent processes 1.5–2.2× less each.
+
+Left as they are:
+
+- The tail of 100 000 items sent one by one to one subscriber, some
+  15 ms at 8 workers: the per-item message is the API of `subscribe/2`.
+- `epochs` and `stream` past 4 workers: `fed ms' grows with the
+  workers, 29 → 80 ms from 4 to 16, since every push of 100 items turns
+  into W feeds and W deltas the coordinator handles before the next
+  push. The price of small pushes, item 4 of the baseline, unchanged.
+- `loop` on one worker showed 58–90 ms across runs in this session
+  against 56–58 before; the spread is the machine's.
