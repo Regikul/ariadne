@@ -27,6 +27,7 @@
     new/1,
     check_open/3,
     close/3,
+    sum/2,
     apply/2,
     in_flight/1,
     complete/3
@@ -36,6 +37,7 @@
     t/0,
     pointstamp/0,
     delta/0,
+    sum/0,
     refusal/0
 ]).
 
@@ -47,6 +49,13 @@
 %% took one item of work off, and the pointstamps it put one on. A
 %% pointstamp put on is listed once per item.
 -type delta() :: {Released :: [pointstamp()], Added :: [pointstamp()]}.
+
+%% The deltas of several deliveries put together: how many items of
+%% work every pointstamp gained less how many it lost, the pointstamps
+%% that came out even left out. Deltas released work in one and the
+%% same round it was added in, so several put together weigh as much
+%% as the deliveries they came from, not as the events delivered.
+-type sum() :: #{pointstamp() => integer()}.
 
 %% Why a push or a closing was refused: the caller named an input
 %% the graph has not, or an epoch closed already. A refusal is the
@@ -122,19 +131,47 @@ close(Input, Epoch, #progress{inputs = Inputs} = Progress) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Applies the delta `Delta': the work added is counted first, the
-%% work released is taken off afterwards.
+%% Puts the delta `Delta' together with the sum `Sum'.
+%% @end
+%%--------------------------------------------------------------------
+-spec sum(delta(), sum()) -> sum().
+sum({Released, Added}, Sum) ->
+    Counted = lists:foldl(fun(Pointstamp, Acc) -> count(Pointstamp, 1, Acc) end, Sum, Added),
+    lists:foldl(fun(Pointstamp, Acc) -> count(Pointstamp, -1, Acc) end, Counted, Released).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Applies the delta `Delta', or the sum of several: the work added
+%% is counted first, the work released is taken off afterwards.
 %%
 %% Fails with `{unbalanced, Pointstamp}' if the delta releases work
-%% at a pointstamp with none: the deltas fed do not add up, and the
+%% at a pointstamp with less: the deltas fed do not add up, and the
 %% progress is not to be trusted any more.
 %% @end
 %%--------------------------------------------------------------------
--spec apply(delta(), t()) -> t().
+-spec apply(delta() | sum(), t()) -> t().
 apply({Released, Added}, #progress{in_flight = InFlight} = Progress) ->
-    Counted = lists:foldl(fun add/2, Progress, Added),
-    Applied = lists:foldl(fun release/2, Counted, Released),
-    Applied#progress{in_flight = InFlight + messages(Added) - messages(Released)}.
+    Counted = lists:foldl(fun(Pointstamp, Acc) -> add(Pointstamp, 1, Acc) end, Progress, Added),
+    Applied = lists:foldl(fun(Pointstamp, Acc) -> release(Pointstamp, 1, Acc) end, Counted, Released),
+    Applied#progress{in_flight = InFlight + messages(Added) - messages(Released)};
+apply(Sum, #progress{in_flight = InFlight} = Progress) when is_map(Sum) ->
+    Counted = maps:fold(
+        fun
+            (Pointstamp, N, Acc) when N > 0 -> add(Pointstamp, N, Acc);
+            (_Pointstamp, _N, Acc) -> Acc
+        end,
+        Progress,
+        Sum
+    ),
+    Applied = maps:fold(
+        fun
+            (Pointstamp, N, Acc) when N < 0 -> release(Pointstamp, -N, Acc);
+            (_Pointstamp, _N, Acc) -> Acc
+        end,
+        Counted,
+        Sum
+    ),
+    Applied#progress{in_flight = InFlight + lists:sum([N || {{edge, _}, _} := N <- Sum])}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -196,22 +233,38 @@ messages(Pointstamps) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Puts one item of work on a pointstamp. A time new to its location
+%% Counts `N' more items of work at a pointstamp in a sum, or `N'
+%% fewer if it is negative, leaving out a pointstamp that comes out
+%% even.
+%%
+%% @private
+%% @end
+%%--------------------------------------------------------------------
+-spec count(pointstamp(), integer(), sum()) -> sum().
+count(Pointstamp, N, Sum) ->
+    case maps:get(Pointstamp, Sum, 0) + N of
+        0 -> maps:remove(Pointstamp, Sum);
+        Total -> Sum#{Pointstamp => Total}
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Puts `N' items of work on a pointstamp. A time new to its location
 %% is put on the frontier of the location unless a time there
 %% precedes it.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec add(pointstamp(), t()) -> t().
-add({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
+-spec add(pointstamp(), pos_integer(), t()) -> t().
+add({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progress) ->
     case Pending of
-        #{Pointstamp := N} ->
-            Progress#progress{pending = Pending#{Pointstamp := N + 1}};
+        #{Pointstamp := Count} ->
+            Progress#progress{pending = Pending#{Pointstamp := Count + N}};
         _ ->
             #progress{times = Times, frontier = Frontier} = Progress,
             Progress#progress{
-                pending = Pending#{Pointstamp => 1},
+                pending = Pending#{Pointstamp => N},
                 times = Times#{Location => gb_sets:add(Time, maps:get(Location, Times, gb_sets:empty()))},
                 frontier = Frontier#{Location => earliest(Time, maps:get(Location, Frontier, []))}
             }
@@ -219,7 +272,7 @@ add({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Takes one item of work off a pointstamp. A time taken off its
+%% Takes `N' items of work off a pointstamp. A time taken off its
 %% location for good leaves the frontier of the location, which is
 %% then built anew from the times left, if it was on it: outside of
 %% every loop the times are totally ordered and the frontier is the
@@ -228,10 +281,10 @@ add({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec release(pointstamp(), t()) -> t().
-release({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) ->
+-spec release(pointstamp(), pos_integer(), t()) -> t().
+release({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progress) ->
     case Pending of
-        #{Pointstamp := 1} ->
+        #{Pointstamp := N} ->
             #progress{times = Times, frontier = Frontier} = Progress,
             Left = gb_sets:delete(Time, maps:get(Location, Times)),
             case gb_sets:is_empty(Left) of
@@ -253,8 +306,8 @@ release({Location, Time} = Pointstamp, #progress{pending = Pending} = Progress) 
                             end
                     }
             end;
-        #{Pointstamp := N} ->
-            Progress#progress{pending = Pending#{Pointstamp := N - 1}};
+        #{Pointstamp := Count} when Count > N ->
+            Progress#progress{pending = Pending#{Pointstamp := Count - N}};
         _ ->
             error({unbalanced, Pointstamp})
     end.

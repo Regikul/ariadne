@@ -136,14 +136,14 @@ close(Coordinator, Input, Epoch) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Reports the delta `Delta' of the deliveries the worker `Worker'
-%% made, see {@link ari_progress:delta()}. The reports of a worker
-%% are applied in the order they are made in.
+%% Reports the sum `Sum' of the deltas of the deliveries the worker
+%% `Worker' made, see {@link ari_progress:sum()}. The reports of a
+%% worker are applied in the order they are made in.
 %% @end
 %%--------------------------------------------------------------------
--spec report(Coordinator :: pid(), Worker :: pid(), ari_progress:delta()) -> ok.
-report(Coordinator, Worker, Delta) ->
-    gen_server:cast(Coordinator, {delta, Worker, Delta}).
+-spec report(Coordinator :: pid(), Worker :: pid(), ari_progress:sum()) -> ok.
+report(Coordinator, Worker, Sum) ->
+    gen_server:cast(Coordinator, {delta, Worker, Sum}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -192,23 +192,23 @@ handle_call({close, Input, Epoch}, _From, #coordinator{progress = Progress} = Co
     end.
 
 %% @private
-handle_cast({delta, Worker, {_Released, Added} = Delta}, Coordinator) ->
+handle_cast({delta, Worker, Sum}, Coordinator) ->
     #coordinator{progress = Progress, asked = Asked} = Coordinator,
-    Applied = ari_progress:apply(Delta, Progress),
-    Asked2 = lists:foldl(
+    Applied = ari_progress:apply(Sum, Progress),
+    Asked2 = maps:fold(
         fun
-            ({{vertex, Vertex}, Time}, Acc) ->
+            ({{vertex, Vertex}, Time}, N, Acc) when N > 0 ->
                 Workers =
                     case ari_asked:find(Vertex, Time, Acc) of
                         {value, Ws} -> Ws;
                         none -> []
                     end,
                 ari_asked:add(Vertex, Time, [Worker | Workers], Acc);
-            ({{edge, _Edge}, _Time}, Acc) ->
+            (_Pointstamp, _N, Acc) ->
                 Acc
         end,
         Asked,
-        Added
+        Sum
     ),
     {noreply, dispatch(admit(Coordinator#coordinator{progress = Applied, asked = Asked2}))}.
 

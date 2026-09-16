@@ -6,8 +6,9 @@
 %%% A worker runs a copy of the graph: an engine of its own (see
 %%% {@link ari_engine}) with the states of every vertex, delivering
 %%% the messages of its queue and the notifications the coordinator
-%%% tells it are due, and reporting every delivery to the coordinator
-%%% as a delta, see {@link ari_progress:delta/0}. The workers are
+%%% tells it are due, and reporting the deliveries of a round to the
+%%% coordinator as one sum of their deltas, see {@link
+%%% ari_progress:sum/0}. The workers are
 %%% numbered; a worker learns its number and how many there are at
 %%% start, and the processes of the others once the coordinator
 %%% wires the runtime, see {@link wire/3}.
@@ -191,10 +192,11 @@ terminate(_Reason, #worker{engine = Engine}) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Runs a round started with the delta `Delta': delivers the messages
-%% of the queue, reports the deltas of the round as one, sends the
-%% messages of the outbox to the workers they belong to and sends
-%% the items that left the graph to the subscribers. If the round is
-%% cut short, another one is asked for.
+%% of the queue, reports the deltas of the round as one sum (see
+%% {@link ari_progress:sum/2}), sends the messages of the outbox to
+%% the workers they belong to and sends the items that left the
+%% graph to the subscribers. If the round is cut short, another one
+%% is asked for.
 %%
 %% The report goes out before the outbox does, so that the
 %% coordinator counts a message before the worker it goes to can
@@ -205,11 +207,8 @@ terminate(_Reason, #worker{engine = Engine}) ->
 %%--------------------------------------------------------------------
 -spec round(#worker{}, ari_progress:delta()) -> #worker{}.
 round(#worker{coordinator = Coordinator} = Worker, Delta) ->
-    {Worker2, Delta2, Exhausted} = steps(?ROUND, Worker, Delta),
-    case Delta2 of
-        {[], []} -> ok;
-        _ -> ari_crt_coordinator:report(Coordinator, self(), Delta2)
-    end,
+    {Worker2, Sum, Exhausted} = steps(?ROUND, Worker, ari_progress:sum(Delta, #{})),
+    map_size(Sum) =:= 0 orelse ari_crt_coordinator:report(Coordinator, self(), Sum),
     Worker3 = publish(exchange(Worker2)),
     Exhausted andalso gen_server:cast(self(), round),
     Worker3.
@@ -217,27 +216,23 @@ round(#worker{coordinator = Coordinator} = Worker, Delta) ->
 %%--------------------------------------------------------------------
 %% @doc
 %% Delivers up to `Steps' messages of the queue, adding their deltas
-%% to `Delta', until the queue is empty. Tells whether the steps ran
-%% out before the queue did.
-%%
-%% The order of the pointstamps within a delta does not matter to
-%% the progress, see {@link ari_progress:apply/2}, so the deltas
-%% are put together without regard to it.
+%% to the sum `Sum', until the queue is empty. Tells whether the
+%% steps ran out before the queue did.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec steps(Steps :: non_neg_integer(), #worker{}, ari_progress:delta()) ->
-    {#worker{}, ari_progress:delta(), Exhausted :: boolean()}.
-steps(0, Worker, Delta) ->
-    {Worker, Delta, true};
-steps(Steps, #worker{engine = Engine} = Worker, {Released, Added}) ->
+-spec steps(Steps :: non_neg_integer(), #worker{}, ari_progress:sum()) ->
+    {#worker{}, ari_progress:sum(), Exhausted :: boolean()}.
+steps(0, Worker, Sum) ->
+    {Worker, Sum, true};
+steps(Steps, #worker{engine = Engine} = Worker, Sum) ->
     case ari_engine:dequeue(Engine) of
         {Event, Engine2} ->
-            {Engine3, {R, A}} = ari_engine:deliver(Event, Engine2),
-            steps(Steps - 1, Worker#worker{engine = Engine3}, {R ++ Released, A ++ Added});
+            {Engine3, Delta} = ari_engine:deliver(Event, Engine2),
+            steps(Steps - 1, Worker#worker{engine = Engine3}, ari_progress:sum(Delta, Sum));
         empty ->
-            {Worker, {Released, Added}, false}
+            {Worker, Sum, false}
     end.
 
 %%--------------------------------------------------------------------

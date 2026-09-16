@@ -234,3 +234,67 @@ the single runtime 15 % on `pipeline` and 25 % on `loop`, two tree
 operations per message; the counts stayed in a flat map, and the
 ordered set of times of a location is touched only when a time
 appears at the location or leaves it.
+
+## After 2: the deltas of a round summed
+
+A worker used to report a round as two lists of pointstamps, one
+entry per message delivered and per message sent -- up to 2000 for a
+round of 1000 steps, of which a handful were distinct -- and the
+coordinator counted them one by one. Now the worker sums the deltas of
+a round into a map of pointstamp to net count (see
+`ari_progress:sum/2`), and the coordinator applies the map. The same
+loads, one worker, 16 schedulers:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step coord% mailbox   wrk KB coord KB  busy
+pipeline  {4,100000}           1    400000     215.2   205.8..231.8    0.54    6.3       0    23454    20216   0.8
+pipeline  {4,1000}             1      4000       2.9       2.7..4.0    0.72    6.8       0      448      224   1.2
+exchange  {4,100000}           1    400000     219.1   213.7..229.9    0.55    6.1       0    23454    20216   0.8
+epochs    {1000,100}           1    101000      76.3     73.7..87.3    0.76   26.2       0     7457     1173   1.5
+stream    {1000,100,1000}      1    101000      87.4     82.2..95.8    0.87   26.5       0      725     1088   1.5
+loop      {1000,100}           1    100100      58.2     56.6..58.7    0.58    0.3       0      191       40   1.1
+```
+
+The coordinator's share of the reductions fell from 19.5 to 6.3 % on
+`pipeline` and from 18 to 0.3 % on `loop`; `pipeline {4,100000}` on
+one worker went from 251 to 215 ms, 0.54 µs/step against 0.48 of the
+single runtime. The coordinator's heap on `pipeline` at 4 workers and
+more fell from 72–167 MB to 18.7 MB, which is the copy of the push,
+and on `loop` from 26–52 MB to 40–107 KB; the worker's heap on `loop`
+from 1173 to 191 KB. Item 3 of the baseline is closed by this.
+
+### The schedulers of this machine
+
+With the coordinator out of the way the runs at 12 workers and more
+turned bimodal: `exchange {4,100000}` at 16 workers takes either about
+100 ms or 0.8–2 s, all 16 schedulers busy throughout, and the same
+holds without the watcher of the bench and at a tenth of the load.
+Turning the busy waiting of the schedulers off (`+sbwt none`) does
+not help; running 8 schedulers (`+S 8`) does:
+
+```
+shape     params               W     steps    run ms    min..max ms us/step coord% mailbox   wrk KB coord KB  busy
+pipeline  {4,100000}           1    400000     213.6   196.6..222.8    0.53    6.3       0    23454    20216   0.8
+pipeline  {4,100000}           2    400000     140.8   136.6..152.0    0.35    6.3       0    11857    18680   1.4
+pipeline  {4,100000}           4    400000      97.2     95.3..99.0    0.24    6.2       0     7457    18681   2.7
+pipeline  {4,100000}           8    400000      89.7    85.5..499.9    0.22    6.2       1     4971    18680   4.7
+pipeline  {4,100000}          16    400000      83.7    81.0..497.5    0.21    6.2       6     2848    18683   4.7
+exchange  {4,100000}           1    400000     214.2   202.9..241.0    0.54    6.1       0    23454    20216   0.8
+exchange  {4,100000}           2    400000     141.0   136.6..145.7    0.35    6.0       0    13731    18680   1.4
+exchange  {4,100000}           4    400000     102.4   100.9..104.9    0.26    6.0       0     9345    18682   2.5
+exchange  {4,100000}           8    400000      88.8    76.7..690.1    0.22    6.0       3     8044    18685   4.3
+exchange  {4,100000}          16    400000      86.8     83.1..91.3    0.22    6.2       0     4608    18700   4.2
+stream    {1000,100,1000}      1    101000      84.7     83.8..86.6    0.84   26.5       0      725     1088   1.5
+stream    {1000,100,1000}      2    102000      52.7     50.6..57.5    0.52   28.4       0      725     1173   2.8
+stream    {1000,100,1000}      4    104000      74.4     67.5..76.2    0.72   32.9       0      138      277   2.7
+stream    {1000,100,1000}      8    108000      77.3     74.6..80.6    0.72   36.8       0       65      139   2.9
+stream    {1000,100,1000}     16    116000     104.8    99.4..111.2    0.90   41.4       0       40      138   3.0
+```
+
+So the outliers of item 2 are the machine: 16 schedulers on the 16
+virtual processors WSL2 has over 6 performance and 8 efficient cores,
+and a run is as slow as its slowest worker. The scaling of the runtime
+is to be read from the rows with 8 schedulers: `pipeline` and
+`exchange` reach 84–87 ms at 8 workers and more, with 4.7 schedulers
+busy, which is the serial part -- one push cutting 100 000 items and
+one subscriber taking them -- and stays item 3 of the list to look at.

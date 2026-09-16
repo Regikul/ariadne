@@ -150,9 +150,14 @@ workers() ->
 profile(Load, Workers) ->
     Sup = start(Load, Workers),
     Pids = [coordinator() | workers_of()],
-    Consumer = consumer(Load, Workers),
     eprof:start(),
-    {ok, _} = eprof:profile(Pids, fun() -> feed(Load), await(Consumer) end),
+    %% The fun runs in a process of eprof's own, which the consumer
+    %% has to report to.
+    {ok, _} = eprof:profile(Pids, fun() ->
+        Consumer = consumer(Load, Workers),
+        feed(Load),
+        await(Consumer)
+    end),
     eprof:analyze(total, [{sort, time}]),
     eprof:stop(),
     stop(Sup).

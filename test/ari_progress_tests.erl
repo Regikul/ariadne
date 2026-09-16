@@ -71,6 +71,45 @@ releasing_work_never_added_fails_test() ->
     ).
 
 %%%===================================================================
+%%% The sums
+%%%===================================================================
+
+a_sum_counts_the_work_by_the_pointstamp_test() ->
+    T = ari_vtime:new(0),
+    Sum = ari_progress:sum(
+        {[{{edge, input}, T}], [{{edge, link}, T}, {{edge, link}, T}, {{vertex, second}, T}]},
+        ari_progress:sum({[], [{{edge, input}, T}, {{edge, input}, T}]}, #{})
+    ),
+    ?assertEqual(#{{{edge, input}, T} => 1, {{edge, link}, T} => 2, {{vertex, second}, T} => 1}, Sum).
+
+work_added_and_released_within_a_sum_leaves_no_trace_test() ->
+    T = ari_vtime:new(0),
+    Sum = ari_progress:sum({[{{edge, link}, T}], []}, ari_progress:sum({[], [{{edge, link}, T}]}, #{})),
+    ?assertEqual(#{}, Sum).
+
+a_sum_applies_as_its_deltas_would_test() ->
+    T0 = ari_vtime:new(0),
+    T1 = ari_vtime:new(1),
+    Deltas = [
+        {[], [{{edge, input}, T0}, {{edge, input}, T0}, {{edge, input}, T1}]},
+        {[{{edge, input}, T0}], [{{edge, link}, T0}, {{vertex, first}, T0}]},
+        {[{{edge, input}, T0}, {{edge, link}, T0}], [{{vertex, second}, T0}]}
+    ],
+    P0 = ari_progress:new([input]),
+    OneByOne = lists:foldl(fun ari_progress:apply/2, P0, Deltas),
+    AtOnce = ari_progress:apply(lists:foldl(fun ari_progress:sum/2, #{}, Deltas), P0),
+    ?assertEqual(OneByOne, AtOnce),
+    ?assertEqual(1, ari_progress:in_flight(AtOnce)).
+
+a_sum_releasing_more_than_there_is_fails_test() ->
+    T = ari_vtime:new(0),
+    P = ari_progress:apply({[], [{{edge, link}, T}]}, ari_progress:new([input])),
+    ?assertError(
+        {unbalanced, {{edge, link}, T}},
+        ari_progress:apply(#{{{edge, link}, T} => -2}, P)
+    ).
+
+%%%===================================================================
 %%% Completeness
 %%%===================================================================
 
