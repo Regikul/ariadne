@@ -302,12 +302,13 @@ feed(Input, Time, Messages, #coordinator{plan = Plan, workers = Workers, count =
             undefined -> in_turn(Messages, Next, Count, erlang:make_tuple(Count, []));
             _Key -> {by_key(Messages, Plan, Input, Count, #{}), Next}
         end,
-    maps:foreach(
+    lists:foreach(
         fun
-            (_N, []) -> ok;
-            (N, Reversed) -> ari_crt_worker:feed(element(N, Workers), Input, Time, lists:reverse(Reversed))
+            ({_N, []}) -> ok;
+            ({N, Reversed}) ->
+                ari_crt_worker:feed(element(N, Workers), Input, Time, lists:reverse(Reversed))
         end,
-        Batches
+        maps:to_list(Batches)
     ),
     Next2.
 

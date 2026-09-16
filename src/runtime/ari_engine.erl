@@ -106,7 +106,7 @@ new(Plan, Index, Count) when Index >= 1, Index =< Count ->
         queue = queue:new(),
         outbox = #{},
         notifications = ari_asked:new(),
-        outputs = #{Output => [] || Output <- ari_plan:outputs(Plan)}
+        outputs = maps:from_list([{Output, []} || Output <- ari_plan:outputs(Plan)])
     }.
 
 %%--------------------------------------------------------------------
@@ -315,7 +315,10 @@ init(Plan, [Vertex | Rest], States) ->
         State -> init(Plan, Rest, States#{Vertex => State})
     catch
         Class:Reason:Stacktrace ->
-            maps:foreach(fun(V, S) -> _ = terminate(Plan, V, S), ok end, States),
+            lists:foreach(
+                fun({V, S}) -> _ = terminate(Plan, V, S), ok end,
+                maps:to_list(States)
+            ),
             erlang:raise(Class, Reason, Stacktrace)
     end.
 

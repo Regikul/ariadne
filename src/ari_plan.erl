@@ -213,7 +213,7 @@ outgoing(#plan{outgoing = Outgoing}, From) ->
 %%--------------------------------------------------------------------
 -spec inputs(Plan :: t()) -> [atom()].
 inputs(#plan{edges = Edges}) ->
-    [Name || Name := #pedge{from = undefined} <- Edges].
+    [Name || {Name, #pedge{from = undefined}} <- maps:to_list(Edges)].
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -223,7 +223,7 @@ inputs(#plan{edges = Edges}) ->
 %%--------------------------------------------------------------------
 -spec outputs(Plan :: t()) -> [atom()].
 outputs(#plan{edges = Edges}) ->
-    [Name || Name := #pedge{to = undefined} <- Edges].
+    [Name || {Name, #pedge{to = undefined}} <- maps:to_list(Edges)].
 
 %%--------------------------------------------------------------------
 %% @doc

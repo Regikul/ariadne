@@ -102,7 +102,11 @@ remove(Vertex, Time, Asked) ->
 %%--------------------------------------------------------------------
 -spec to_list(t(Value)) -> [{Vertex :: atom(), ari_vtime:t(), Value}].
 to_list(Asked) ->
-    [{Vertex, Time, Value} || Vertex := Times <- Asked, {Time, Value} <- gb_trees:to_list(Times)].
+    [
+        {Vertex, Time, Value}
+     || {Vertex, Times} <- maps:to_list(Asked),
+        {Time, Value} <- gb_trees:to_list(Times)
+    ].
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -115,7 +119,8 @@ to_list(Asked) ->
 first(Complete, Asked) ->
     Found = [
         {Time, Vertex, Value}
-     || Vertex := Times <- Asked, {Time, Value} <- walk(one, Vertex, Times, Complete)
+     || {Vertex, Times} <- maps:to_list(Asked),
+        {Time, Value} <- walk(one, Vertex, Times, Complete)
     ],
     case lists:sort(Found) of
         [] -> none;
@@ -132,7 +137,8 @@ first(Complete, Asked) ->
 due(Complete, Asked) ->
     Found = lists:sort([
         {Time, Vertex, Value}
-     || Vertex := Times <- Asked, {Time, Value} <- walk(all, Vertex, Times, Complete)
+     || {Vertex, Times} <- maps:to_list(Asked),
+        {Time, Value} <- walk(all, Vertex, Times, Complete)
     ]),
     Due = [{Vertex, Time, Value} || {Time, Vertex, Value} <- Found],
     {Due, lists:foldl(fun({Vertex, Time, _Value}, Acc) -> remove(Vertex, Time, Acc) end, Asked, Due)}.

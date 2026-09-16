@@ -106,7 +106,7 @@ new(Inputs) ->
         times = #{},
         frontier = #{},
         in_flight = 0,
-        inputs = #{Input => 0 || Input <- Inputs}
+        inputs = maps:from_list([{Input, 0} || Input <- Inputs])
     }.
 
 %%--------------------------------------------------------------------
@@ -183,7 +183,9 @@ apply(Sum, #progress{in_flight = InFlight} = Progress) when is_map(Sum) ->
         Counted,
         Sum
     ),
-    Applied#progress{in_flight = InFlight + lists:sum([N || {{edge, _}, _} := N <- Sum])}.
+    Applied#progress{
+        in_flight = InFlight + lists:sum([N || {{{edge, _}, _}, N} <- maps:to_list(Sum)])
+    }.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -222,8 +224,14 @@ in_flight(#progress{in_flight = InFlight}) ->
 complete(Summaries, {Vertex, Time}, #progress{frontier = Frontier, inputs = Inputs}) ->
     Own = {vertex, Vertex},
     Outstanding =
-        [{Location, Earliest} || Location := Frontline <- Frontier, Earliest <- Frontline] ++
-        [{{edge, Input}, ari_vtime:new(Open)} || Input := Open <- Inputs],
+        [
+            {Location, Earliest}
+         || {Location, Frontline} <- maps:to_list(Frontier), Earliest <- Frontline
+        ] ++
+        [
+            {{edge, Input}, ari_vtime:new(Open)}
+         || {Input, Open} <- maps:to_list(Inputs)
+        ],
     not lists:any(
         fun
             ({Location, From}) when Location =:= Own ->
@@ -349,7 +357,7 @@ release({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progres
 %%--------------------------------------------------------------------
 -spec earliest_of(groups()) -> [ari_vtime:t(), ...].
 earliest_of(Groups) ->
-    earliest([gb_sets:smallest(Group) || _Iterations := Group <- Groups]).
+    earliest([gb_sets:smallest(Group) || {_Iterations, Group} <- maps:to_list(Groups)]).
 
 %%--------------------------------------------------------------------
 %% @doc

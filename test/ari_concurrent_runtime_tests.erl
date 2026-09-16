@@ -314,8 +314,15 @@ the_items_handed_over_are_counted_before_they_are_delivered_test() ->
     ok = ari_concurrent_runtime:push(handed_counted, input, 0, Items),
     ok = ari_concurrent_runtime:close(handed_counted, input, 0),
     T = ari_vtime:new(0),
-    Counts = maps:groups_from_list(fun(Item) -> worker_of(Item, 3) end, Items),
-    Expected = lists:sort([{length(Of), T} || _Worker := Of <- Counts]),
+    Counts = lists:foldl(
+        fun(Item, Acc) ->
+            Worker = worker_of(Item, 3),
+            Acc#{Worker => [Item | maps:get(Worker, Acc, [])]}
+        end,
+        #{},
+        Items
+    ),
+    Expected = lists:sort([{length(Of), T} || {_Worker, Of} <- maps:to_list(Counts)]),
     ?assertEqual(Expected, lists:sort(receive_n(map_size(Counts), handed_counted, output))),
     stop(Sup).
 

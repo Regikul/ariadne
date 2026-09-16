@@ -297,7 +297,10 @@ steps(Steps, #worker{engine = Engine, sum = Sum} = Worker) ->
 -spec exchange(#worker{}) -> #worker{}.
 exchange(#worker{engine = Engine, workers = Workers} = Worker) ->
     {Outbox, Engine2} = ari_engine:outbox(Engine),
-    maps:foreach(fun(Copy, Events) -> exchange(element(Copy, Workers), Events) end, Outbox),
+    lists:foreach(
+        fun({Copy, Events}) -> exchange(element(Copy, Workers), Events) end,
+        maps:to_list(Outbox)
+    ),
     Worker#worker{engine = Engine2}.
 
 %%--------------------------------------------------------------------

@@ -265,7 +265,7 @@ subscribe(Name, Output, Subscriber, Scope, Coordinator, Monitor) ->
 subscription_failed(Name, Output, Subscriber, Monitor, Reason) ->
     %% The old scope may be gone already. If the join reached a new
     %% scope, one leave compensates its one membership.
-    _ = catch pg:leave(Name, {output, Output}, Subscriber),
+    _ = (catch pg:leave(Name, {output, Output}, Subscriber)),
     _ = demonitor(Monitor, [flush]),
     exit({Reason, Name}).
 

@@ -227,16 +227,16 @@ add(Table, From, To, Summaries) ->
 %%--------------------------------------------------------------------
 -spec check(Table :: t()) -> t().
 check(Table) ->
-    maps:foreach(
+    lists:foreach(
         fun
-            ({Location, Location}, Summaries) ->
+            ({{Location, Location}, Summaries}) ->
                 case lists:all(fun ari_summary:advances/1, Summaries) of
                     true -> ok;
                     false -> error({non_advancing_cycle, Location})
                 end;
-            (_Pair, _Summaries) ->
+            ({_Pair, _Summaries}) ->
                 ok
         end,
-        Table
+        maps:to_list(Table)
     ),
     Table.
