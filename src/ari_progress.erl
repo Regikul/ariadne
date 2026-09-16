@@ -18,6 +18,14 @@
 %%% reaches no further than an earlier one does, so the cost of the
 %%% question is that of the graph, not of the work outstanding.
 %%%
+%%% The frontier is built anew when a time leaves it, from the
+%%% outstanding times of the location kept in groups by their stack
+%%% of loop counters: the times of a group differ in the epoch alone
+%%% and are totally ordered, so the earliest of every group is the
+%%% only one of it that may be on the frontier, and the cost of
+%%% building is that of the number of groups -- the counters the
+%%% work is spread over -- not of the number of epochs open.
+%%%
 %%% @end
 %%%-------------------------------------------------------------------
 
@@ -67,9 +75,10 @@
     %% How many items of work are outstanding at every pointstamp.
     pending :: #{pointstamp() => pos_integer()},
     %% The times work is outstanding at, of every location with any,
-    %% in the order of terms, which puts a time before every time it
-    %% precedes.
-    times :: #{ari_summaries:location() => gb_sets:set(ari_vtime:t())},
+    %% in groups by the stack of loop counters (see {@link
+    %% ari_vtime:iterations/1}), every group in the order of the
+    %% epochs.
+    times :: #{ari_summaries:location() => groups()},
     %% The frontier of every location with work outstanding.
     frontier :: #{ari_summaries:location() => [ari_vtime:t(), ...]},
     %% How many of the items are messages, i.e. outstanding on an edge.
@@ -79,6 +88,8 @@
 }).
 
 -opaque t() :: #progress{}.
+
+-type groups() :: #{[non_neg_integer()] => gb_sets:set(ari_vtime:t())}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -263,9 +274,12 @@ add({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progress) -
             Progress#progress{pending = Pending#{Pointstamp := Count + N}};
         _ ->
             #progress{times = Times, frontier = Frontier} = Progress,
+            Groups = maps:get(Location, Times, #{}),
+            Iterations = ari_vtime:iterations(Time),
+            Group = gb_sets:add(Time, maps:get(Iterations, Groups, gb_sets:empty())),
             Progress#progress{
                 pending = Pending#{Pointstamp => N},
-                times = Times#{Location => gb_sets:add(Time, maps:get(Location, Times, gb_sets:empty()))},
+                times = Times#{Location => Groups#{Iterations => Group}},
                 frontier = Frontier#{Location => earliest(Time, maps:get(Location, Frontier, []))}
             }
     end.
@@ -274,9 +288,7 @@ add({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progress) -
 %% @doc
 %% Takes `N' items of work off a pointstamp. A time taken off its
 %% location for good leaves the frontier of the location, which is
-%% then built anew from the times left, if it was on it: outside of
-%% every loop the times are totally ordered and the frontier is the
-%% earliest time left; inside, the times left are gone over.
+%% then built anew from the times left, if it was on it.
 %%
 %% @private
 %% @end
@@ -286,8 +298,15 @@ release({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progres
     case Pending of
         #{Pointstamp := N} ->
             #progress{times = Times, frontier = Frontier} = Progress,
-            Left = gb_sets:delete(Time, maps:get(Location, Times)),
-            case gb_sets:is_empty(Left) of
+            Groups = maps:get(Location, Times),
+            Iterations = ari_vtime:iterations(Time),
+            Group = gb_sets:delete(Time, maps:get(Iterations, Groups)),
+            Left =
+                case gb_sets:is_empty(Group) of
+                    true -> maps:remove(Iterations, Groups);
+                    false -> Groups#{Iterations := Group}
+                end,
+            case map_size(Left) =:= 0 of
                 true ->
                     Progress#progress{
                         pending = maps:remove(Pointstamp, Pending),
@@ -314,18 +333,16 @@ release({Location, Time} = Pointstamp, N, #progress{pending = Pending} = Progres
 
 %%--------------------------------------------------------------------
 %% @doc
-%% The frontier of the times of `Times', which has some.
+%% The frontier of the times of the groups `Groups', which have
+%% some: the earliest of every group no earliest of another group
+%% precedes.
 %%
 %% @private
 %% @end
 %%--------------------------------------------------------------------
--spec earliest_of(gb_sets:set(ari_vtime:t())) -> [ari_vtime:t(), ...].
-earliest_of(Times) ->
-    Smallest = gb_sets:smallest(Times),
-    case ari_vtime:outside(Smallest) of
-        true -> [Smallest];
-        false -> earliest(gb_sets:to_list(Times))
-    end.
+-spec earliest_of(groups()) -> [ari_vtime:t(), ...].
+earliest_of(Groups) ->
+    earliest([gb_sets:smallest(Group) || _Iterations := Group <- Groups]).
 
 %%--------------------------------------------------------------------
 %% @doc

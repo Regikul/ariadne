@@ -531,3 +531,70 @@ With the subscriber off the heap and the rounds whole, the runtime
 uses 16 and 32 workers on 16 schedulers as well as 8: `pipeline` at
 46–48 ms from 8 workers on, 4.4× of one worker, against the 5.2× of
 eight processes sharing nothing on this machine.
+
+## After 5: the frontier built from the earliest of every group
+
+A new form of `loop`, `{L, M, E}`: `E` epochs of `M` messages, every
+one pushed before any is closed, so that the loop holds many epochs
+at once. Before, scaling the epochs alone, single runtime:
+
+```
+shape      params              steps       run ms    min..max ms  us/step  pushed KB     ran KB    peak KB
+loop       {10,10,1000}       110000        288.2   283.1..295.3     2.62        601        628       4608
+loop       {10,10,3000}       330000       2200.1 2175.3..2224.0     6.67       1799       1878      15980
+loop       {10,10,10000}     1100000      22510.8 22264.5..22679    20.46       6000       6253      46803
+loop       {1000,1,100}       100100        623.5   577.1..647.6     6.23         19         10        191
+loop       {1000,1,300}       300300       3861.1 3582.6..4075.3    12.86         55         22        448
+loop       {1000,1,1000}     1001000      27145.1 26737.5..27354    27.12        179         66       1760
+```
+
+Quadratic in the epochs open: three times the epochs, two and a half
+to three times the step. The profile of `{10,10,1000}` puts 90 % of
+the time in `ari_progress:earliest/2`, `gb_sets:to_list` and
+`ari_vtime:le`: the frontier of a location inside of a loop was
+built anew, whenever a time left it, from every outstanding time of
+the location, and a time leaves it once per pointstamp that runs
+out, so E·L rebuilds of E times each.
+
+The concurrent runtime on one worker read flat (0.71, 0.83, 0.88
+µs/step over the first three rows) for a reason of its own: a
+worker takes one message of its mailbox per round, so the queue of
+its engine holds two or three epochs at a time and the sums of a
+round net out to a few pointstamps; the coordinator of
+`{10,10,3000}` rebuilt a frontier 7 times in all. The path is the
+same, and a worker behind by many feeds would pay the same.
+
+Now the outstanding times of a location are kept in groups by their
+stack of loop counters; the times of a group differ in the epoch
+alone and are totally ordered, so the frontier is built from the
+earliest of every group, `gb_sets:smallest` each, and the number of
+epochs open drops out of the cost. After:
+
+```
+shape      params              steps       run ms    min..max ms  us/step  pushed KB     ran KB    peak KB
+loop       {10,10,1000}       110000        105.9   104.0..131.8     0.96        601        628       4608
+loop       {10,10,3000}       330000        353.9   308.0..422.3     1.07       1799       1878      18679
+loop       {10,10,10000}     1100000       1113.8 1073.6..1183.5     1.01       5999       6253      48105
+loop       {1000,1,100}       100100        221.4   213.2..225.0     2.21         19         10        191
+loop       {1000,1,300}       300300        788.1   752.0..797.9     2.62         55         22        415
+loop       {1000,1,1000}     1001000       2505.9 2497.0..2516.7     2.50        179         66       1760
+loop       {10,100,10}         11000          8.0       7.8..8.1     0.73         50         66        725
+loop       {10,100,100}       110000         66.4     64.7..67.1     0.60        483        628       7457
+loop       {10,100,1000}     1100000        819.6   807.4..837.8     0.75       4820       6253      54863
+loop       {10,100}             1100          0.7       0.6..0.7     0.62          6         10        105
+loop       {100,100}           10100          5.4       5.2..5.7     0.53          6         10        105
+loop       {1000,100}         100100         54.5     53.7..55.3     0.54          6         10        105
+epochs     {1000,100}         101000         88.0     87.3..89.0     0.87       4819         64      20003
+pipeline   {4,100000}         400000        191.5   187.1..202.3     0.48       4692       6262      32005
+```
+
+Flat in the epochs. The rows of one message per pointstamp
+(`{1000,1,E}`) stay at 2.5 µs/step against 1.0 with ten and 0.54
+with a hundred: a pointstamp running out costs some 2 µs of
+`gb_sets` -- the delete, and the add that rebalances the group after
+the deletes -- which is paid once per pointstamp, not per message.
+The rows without open epochs are unchanged (`loop {1000,100}` 54.5
+ms, `epochs {1000,100}` 88, `pipeline {4,100000}` 191). The
+concurrent rows are unchanged as well: `{10,10,E}` at 0.75, 0.80,
+0.87 µs/step, `{1000,1,E}` at 0.78, 0.90 and 1.2–1.5 with a wide
+spread from 1000 epochs on, coordinator share 0.6 %.

@@ -23,7 +23,10 @@
 %%% closed as soon as it is pushed: the runtime as a service under
 %%% a producer held back by the limit;</li>
 %%% <li>`loop' -- a vertex iterating every one of `M' messages `L'
-%%% times through a feedback edge: the work inside of a loop.</li>
+%%% times through a feedback edge: the work inside of a loop;</li>
+%%% <li>`loop' with a third parameter `E' -- the vertex fed `E'
+%%% epochs of `M' messages, every one pushed before any is closed:
+%%% the frontier of a loop with several epochs open.</li>
 %%% </ul>
 %%%
 %%% A load is run in a branch of its own, started before the clock
@@ -412,6 +415,8 @@ grid() ->
         {stream, {E, 100, L}} || E <- [100, 1000], L <- [100, 1000]
     ] ++ [
         {loop, {L, 100}} || L <- [10, 100, 1000]
+    ] ++ [
+        {loop, {10, 100, E}} || E <- [10, 100, 1000]
     ].
 
 -spec opts(load(), Workers :: pos_integer()) -> ari_concurrent_runtime:opts().
@@ -432,7 +437,8 @@ graph({epochs, _}) ->
     counting();
 graph({stream, _}) ->
     counting();
-graph({loop, {L, _M}}) ->
+graph({loop, Params}) ->
+    L = element(1, Params),
     ari_graph:graph([
         ari_graph:in(input, {inc, in}),
         ari_graph:loop(spin, [
@@ -484,7 +490,11 @@ feed({stream, {E, M, _L}}) ->
     );
 feed({loop, {_L, M}}) ->
     ok = ari_concurrent_runtime:push(?NAME, input, 0, lists:duplicate(M, 0)),
-    ok = ari_concurrent_runtime:close(?NAME, input, 0).
+    ok = ari_concurrent_runtime:close(?NAME, input, 0);
+feed({loop, {_L, M, E}}) ->
+    Messages = lists:duplicate(M, 0),
+    [ok = ari_concurrent_runtime:push(?NAME, input, Epoch, Messages) || Epoch <- lists:seq(0, E - 1)],
+    ok = ari_concurrent_runtime:close(?NAME, input, E - 1).
 
 %% The number of items the output of the load delivers on `Workers'
 %% workers. Every worker runs a copy of the counting vertex, and the
@@ -495,7 +505,8 @@ outputs({pipeline, {_K, M}}, _Workers) -> M;
 outputs({exchange, {_K, M}}, _Workers) -> M;
 outputs({epochs, {E, M}}, Workers) -> E * min(M, Workers);
 outputs({stream, {E, M, _L}}, Workers) -> E * min(M, Workers);
-outputs({loop, {_L, M}}, _Workers) -> M.
+outputs({loop, {_L, M}}, _Workers) -> M;
+outputs({loop, {_L, M, E}}, _Workers) -> E * M.
 
 %% The number of events the workers deliver for the load: every
 %% message once, every notification once per worker asking.
@@ -504,4 +515,5 @@ steps({pipeline, {K, M}}, _Workers) -> K * M;
 steps({exchange, {K, M}}, _Workers) -> K * M;
 steps({epochs, {E, M}}, Workers) -> E * M + E * min(M, Workers);
 steps({stream, {E, M, _L}}, Workers) -> E * M + E * min(M, Workers);
-steps({loop, {L, M}}, _Workers) -> M * (L + 1).
+steps({loop, {L, M}}, _Workers) -> M * (L + 1);
+steps({loop, {L, M, E}}, _Workers) -> E * M * (L + 1).

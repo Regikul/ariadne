@@ -172,6 +172,28 @@ work_at_incomparable_times_is_on_the_frontier_side_by_side_test() ->
     ?assert(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Later)}, P2)),
     ?assertNot(ari_progress:complete(looping(), {inc, ari_vtime:feedback(Next)}, P2)).
 
+work_of_several_epochs_at_one_iteration_uncovers_epoch_by_epoch_test() ->
+    %% {0, [1]} and {1, [1]} are of one group, the first preceding the
+    %% second; {2, [0]} is incomparable with both.
+    First = ari_vtime:feedback(ari_vtime:ingress(ari_vtime:new(0))),
+    Second = ari_vtime:feedback(ari_vtime:ingress(ari_vtime:new(1))),
+    Aside = ari_vtime:ingress(ari_vtime:new(2)),
+    Asked = fun(Time, P) -> ari_progress:complete(looping(), {inc, ari_vtime:feedback(Time)}, P) end,
+    {ok, P0} = ari_progress:close(input, 2, ari_progress:new([input])),
+    P1 = ari_progress:apply({[], [{{edge, again}, T} || T <- [Second, Aside, First]]}, P0),
+    ?assertNot(Asked(First, P1)),
+    ?assertNot(Asked(Second, P1)),
+    ?assertNot(Asked(Aside, P1)),
+    P2 = ari_progress:apply({[{{edge, again}, First}], []}, P1),
+    ?assert(Asked(First, P2)),
+    ?assertNot(Asked(Second, P2)),
+    ?assertNot(Asked(Aside, P2)),
+    P3 = ari_progress:apply({[{{edge, again}, Aside}], []}, P2),
+    ?assertNot(Asked(Second, P3)),
+    ?assert(Asked(Aside, P3)),
+    P4 = ari_progress:apply({[{{edge, again}, Second}], []}, P3),
+    ?assert(Asked(Second, P4)).
+
 %%%===================================================================
 %%% Helpers
 %%%===================================================================

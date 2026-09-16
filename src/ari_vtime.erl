@@ -34,7 +34,8 @@
     egress/1,
     feedback/1,
     le/2,
-    outside/1
+    outside/1,
+    iterations/1
 ]).
 
 -export_type([
@@ -128,6 +129,17 @@ le({EpochA, IterationsA}, {EpochB, IterationsB}) ->
 -spec outside(t()) -> boolean().
 outside({_Epoch, Iterations}) ->
     Iterations =:= [].
+
+%%--------------------------------------------------------------------
+%% @doc
+%% The stack of loop counters of the timestamp, the innermost loop
+%% at the head. Timestamps of one and the same stack differ in the
+%% epoch alone, and of any two, one precedes the other.
+%% @end
+%%--------------------------------------------------------------------
+-spec iterations(t()) -> [non_neg_integer()].
+iterations({_Epoch, Iterations}) ->
+    Iterations.
 
 %%%===================================================================
 %%% Internal functions

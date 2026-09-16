@@ -4,14 +4,17 @@
 %%% the space it takes grow with the load. Nothing is asserted; the
 %%% numbers are printed for a person to read.
 %%%
-%%% Three shapes of load, each scaled by one parameter:
+%%% Three shapes of load, each scaled by its parameters:
 %%% <ul>
 %%% <li>`pipeline' -- a chain of `K' passing vertices fed `M' messages
 %%% of one epoch: the cost of delivering a message;</li>
 %%% <li>`epochs' -- a counting vertex fed `E' epochs of `M' messages,
 %%% every epoch closed: the cost of notifications;</li>
 %%% <li>`loop' -- a vertex iterating every one of `M' messages `L'
-%%% times through a feedback edge: the work inside of a loop.</li>
+%%% times through a feedback edge: the work inside of a loop;</li>
+%%% <li>`loop' with a third parameter `E' -- the vertex fed `E'
+%%% epochs of `M' messages, every one pushed before any is closed:
+%%% the frontier of a loop with several epochs open.</li>
 %%% </ul>
 %%%
 %%% ```
@@ -31,7 +34,7 @@
 ]).
 
 -type shape() :: pipeline | epochs | loop.
--type load() :: {shape(), Params :: {pos_integer(), pos_integer()}}.
+-type load() :: {shape(), Params :: {pos_integer(), pos_integer()} | {pos_integer(), pos_integer(), pos_integer()}}.
 
 -define(REPEATS, 5).
 
@@ -48,6 +51,8 @@ run() ->
         {epochs, {E, 100}} || E <- [10, 30, 100, 300, 1000]
     ] ++ [
         {loop, {L, 100}} || L <- [10, 100, 1000]
+    ] ++ [
+        {loop, {10, 100, E}} || E <- [10, 100, 1000]
     ]).
 
 %%--------------------------------------------------------------------
@@ -165,18 +170,31 @@ loaded({epochs, {E, M}}) ->
     ),
     ari_single_runtime:close(input, E - 1, R1);
 loaded({loop, {L, M}}) ->
-    R0 = ari_single_runtime:new(ari_graph:graph([
+    ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, lists:duplicate(M, 0), looping(L)));
+loaded({loop, {L, M, E}}) ->
+    Messages = lists:duplicate(M, 0),
+    R1 = lists:foldl(
+        fun(Epoch, Acc) -> ari_single_runtime:push(input, Epoch, Messages, Acc) end,
+        looping(L),
+        lists:seq(0, E - 1)
+    ),
+    ari_single_runtime:close(input, E - 1, R1).
+
+%% The runtime of a vertex iterating every message `L' times.
+-spec looping(pos_integer()) -> ari_single_runtime:t().
+looping(L) ->
+    ari_single_runtime:new(ari_graph:graph([
         ari_graph:in(input, {inc, in}),
         ari_graph:loop(spin, [
             ari_graph:node(inc, ari_test_until, L),
             ari_graph:feedback(again, {inc, continue}, {inc, in})
         ]),
         ari_graph:out(output, {inc, done})
-    ])),
-    ari_single_runtime:close(input, 0, ari_single_runtime:push(input, 0, lists:duplicate(M, 0), R0)).
+    ])).
 
 %% The number of steps `run/1' takes for the load.
 -spec steps(load()) -> pos_integer().
 steps({pipeline, {K, M}}) -> K * M;
 steps({epochs, {E, M}}) -> E * M + E;
-steps({loop, {L, M}}) -> M * (L + 1).
+steps({loop, {L, M}}) -> M * (L + 1);
+steps({loop, {L, M, E}}) -> E * M * (L + 1).
